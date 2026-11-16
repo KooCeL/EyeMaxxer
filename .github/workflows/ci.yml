@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install GNU Octave
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends octave-cli
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends octave
       - name: Run scenarios
         working-directory: matlab
         run: octave-cli --no-gui --eval "runScenarioTests(false);"
