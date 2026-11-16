@@ -1,47 +1,34 @@
 # Simulink model
 
-The first stage of EyeMaxxer's MATLAB integration was to design the embedded
-control logic in **Simulink** and deploy it to an **Arduino Nano** with the
-*Simulink Support Package for Arduino Hardware*.
+[`simulink_eyestrain.slx`](simulink_eyestrain.slx) is the team's original Simulink model (saved in MATLAB R2025b).
+It was the first stage of EyeMaxxer's MATLAB integration: designing the embedded
+control logic before it went onto the Arduino Nano.
 
-## Model structure
+![Simulink logic map](../docs/images/simulink-logic-map.jpg)
 
-```mermaid
-flowchart LR
-    subgraph Inputs["Arduino input blocks"]
-        US["Ultrasonic sensor<br/>(D9 / D10)"]
-        MIC["Analog Input<br/>A0 (sound)"]
-        DHT["DHT11<br/>humidity (D2)"]
-    end
-    US --> MED["Median filter"]
-    MIC --> P2P["Peak-to-peak +<br/>low-pass filter"]
-    MED --> ESRS
-    P2P --> ESRS
-    DHT --> ESRS
-    ESRS["MATLAB Function block<br/>esrsStep.m<br/>(Unit Delay holds state)"] --> LVL["LED level logic"]
-    LVL --> G["Digital Output D3<br/>green"]
-    LVL --> Y["Digital Output D5<br/>yellow"]
-    LVL --> R["Digital Output D6<br/>red"]
-    ESRS --> P["Digital Output D7<br/>proximity"]
-    ESRS --> SER["Serial Transmit<br/>→ MATLAB dashboard"]
-```
+## Blocks
 
-## Rebuilding the model
+| Block | Type | Role |
+|-------|------|------|
+| `Distance_cm`, `Humidity_pct`, `Noise_level` | Constant | Sensor inputs. Set them to try different conditions, or swap them for Arduino input blocks on hardware |
+| `ESRS_Update` | MATLAB Function | Computes `ESRS_next` from the distance zone rate and the dry / noisy multipliers |
+| `Prev_ESRS` | Unit Delay (1/z) | Feeds `ESRS_next` back in as `ESRS_prev`, so the score accumulates over time |
+| `ESRS Alert` | Compare to constant `>= 70` | Red LED |
+| `Immediate_Alert` | Compare to constant `< 30` | Amber LED (uses the distance directly) |
+| `RestDone` | Compare to constant `== 0` | Green LED |
+| `ESRS`, `RedLED`, `AmberLED`, `GreenLED` | Display | Outputs |
 
-1. Install the **Simulink Support Package for Arduino Hardware** from the Add-On Explorer.
-2. Create a new model and set *Hardware Implementation → Hardware board* to
-   **Arduino Nano 3.0** (or **Arduino Uno**). Use a fixed-step solver with a
-   step size of **0.1 s**.
-3. Add a **MATLAB Function** block that calls
-   [`esrsStep`](../matlab/esrsStep.m). The function only uses scalar maths and
-   structs, so it can be code-generated as-is. Keep `state` in a
-   **Unit Delay** (or a `persistent` variable) and take the parameters from
-   [`esrsParams`](../matlab/esrsParams.m).
-4. Wire the Arduino input/output blocks to the pins listed in
-   [`docs/hardware.md`](../docs/hardware.md).
-5. Use **Monitor & Tune** to tweak thresholds live, or **Build, Deploy & Start**
-   to run it stand-alone.
+The `ESRS_Update` code is reproduced in [`matlab/esrsStep.m`](../matlab/esrsStep.m)
+(with `dt` and the constants passed in) and ported to C++ in
+[`firmware/EyeMaxxer/esrs.h`](../firmware/EyeMaxxer/esrs.h). Details are in
+[`docs/esrs-algorithm.md`](../docs/esrs-algorithm.md).
 
-> Put the original `.slx` model from the make-a-thon in this folder.
-> The hand-written C++ firmware in [`firmware/`](../firmware) implements the
-> same logic and is the easiest way to flash a board without Simulink.
+## Running it
+
+1. Open `simulink_eyestrain.slx` in MATLAB R2025b or newer.
+2. Change the three Constant blocks (e.g. `Distance_cm = 50`, `Humidity_pct = 28`)
+   and press **Run** to watch the ESRS and LED displays update.
+3. To deploy it to a board, install the **Simulink Support Package for Arduino Hardware**.
+   Then set *Hardware board* to **Arduino Nano 3.0**, swap the Constants for
+   Ultrasonic / Analog Input / DHT blocks and the Displays for Digital Output
+   blocks, and use **Build, Deploy & Start**.

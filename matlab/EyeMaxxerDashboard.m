@@ -1,274 +1,311 @@
 function fig = EyeMaxxerDashboard(port, baud)
-%EYEMAXXERDASHBOARD  Live graphical UI for EyeMaxxer.
-%   EyeMaxxerDashboard()                 simulated demo - no hardware needed
-%   EyeMaxxerDashboard("COM5")           live data from the Arduino on COM5
-%   EyeMaxxerDashboard("/dev/ttyACM0", 115200)
+%EYEMAXXERDASHBOARD  "THE EyeMaxxer" live MATLAB GUI.
+%   EyeMaxxerDashboard               open the GUI; type the port and press Connect
+%   EyeMaxxerDashboard("COM4")       open and connect straight away
+%   EyeMaxxerDashboard("COM4", 9600)
 %
-%   Shows the real-time Eye Strain Risk Score (gauge + trend), the screen
-%   distance with the danger/close zones, the environmental readings and
-%   multiplier, and a mirror of the four LEDs on the device.
-%
-%   In live mode the Arduino streams lines of the form
-%       D,t_ms,distance_cm,noise,humidity_pct,temp_c,multiplier,esrs,zone,level,prox
-%   (see firmware/EyeMaxxer/EyeMaxxer.ino). The "Reset ESRS" button sends 'r'
-%   to the board. In simulated mode the same esrsStep used by the scenario
-%   tests drives the UI from a scripted study session.
+%   Live mode - the Arduino handles all sensor logic, MATLAB visualises.
+%   The board streams lines of the form
+%       D,t_ms,distance_cm,humidity_pct,noise,temp_c,rate_per_min,esrs,zone,green,amber,red
+%   (see ../firmware/EyeMaxxer/EyeMaxxer.ino). Without hardware, press
+%   "Simulate" to drive the GUI from esrsStep with a scripted study session.
 %
 %   Find your port with:  serialportlist("available")
 %   Requires MATLAB R2020a or newer (uifigure, uigauge, uilamp, serialport).
 
-    if nargin < 1 || isempty(port), port = ""; end
-    if nargin < 2, baud = 115200; end
-    live = strlength(string(port)) > 0;
+    if nargin < 1, port = "COM4"; autoConnect = false; else, autoConnect = true; end
+    if nargin < 2, baud = 9600; end
 
     p = esrsParams();
-    windowS = 600;                       % width of the trend plots (s)
+    windowS = 60;                                   % width of the live plots (s)
 
-    % ---------------------------------------------------------------- state
-    H = struct('t', [], 'score', [], 'dist', [], 'level', []);
-    sp = [];                             % serialport (live mode)
-    simState = esrsInit();
-    simT = 0;  simNoise = 0;  simSpeed = 20;
+    % ------------------------------------------------------------------ style
+    C.bg     = [0.07 0.08 0.11];  C.panel = [0.09 0.10 0.14];
+    C.text   = [0.85 0.88 0.92];  C.dim   = [0.50 0.55 0.62];
+    C.accent = [0.55 0.75 1.00];
+    C.green  = [0.20 0.85 0.30];  C.amber = [1.00 0.70 0.15];
+    C.red    = [0.95 0.25 0.20];  C.off   = [0.22 0.22 0.25];
+    C.blue   = [0.35 0.65 1.00];
+    zoneNames  = ["Immediate Danger", "Fast Strain", "Moderate Strain", "Mild Strain", "Recovery"];
+    zoneColors = [C.red; 1 0.5 0.2; 1 0.85 0.2; C.green; C.blue];
+
+    % ------------------------------------------------------------------ state
+    H = struct('t', [], 'esrs', [], 'dist', []);
+    sp = [];  mode = "idle";                        % "idle" | "live" | "sim"
+    simEsrs = 0;  simT = 0;  simNoise = 0;  simSpeed = 30;
     demo = demoSession();
-    lastBlink = false;
+    st = struct('green', true, 'amber', false, 'red', false);
 
-    C.green  = [0.18 0.70 0.30];
-    C.yellow = [0.98 0.75 0.10];
-    C.red    = [0.86 0.20 0.18];
-    C.prox   = [0.20 0.45 0.95];
-    C.off    = [0.30 0.30 0.30];
-    zoneNames  = ["Away / on a break", "DANGER - too close", "Too close", "Healthy distance"];
-    levelNames = ["Low risk", "Rising risk", "High risk - take a break", "Break overdue!"];
+    % ------------------------------------------------------------------ layout
+    fig = uifigure('Name', 'THE EyeMaxxer', 'Position', [60 60 1280 760], 'Color', C.bg);
+    root = uigridlayout(fig, [3 3], 'BackgroundColor', C.bg);
+    root.RowHeight = {60, '1x', 24};
+    root.ColumnWidth = {'1x', '1x', '1.1x'};
 
-    % ---------------------------------------------------------------- layout
-    fig = uifigure('Name', 'EyeMaxxer - Live ESRS Dashboard', ...
-                   'Position', [80 80 1180 720], 'Color', [0.97 0.97 0.98]);
-    g = uigridlayout(fig, [3 3]);
-    g.RowHeight = {'1x', '1x', 40};
-    g.ColumnWidth = {300, '1x', 260};
+    hdr = uigridlayout(root, [2 1], 'BackgroundColor', C.bg, 'Padding', [4 0 0 0], 'RowSpacing', 0);
+    hdr.Layout.Row = 1; hdr.Layout.Column = [1 3];
+    uilabel(hdr, 'Text', 'THE EyeMaxxer', 'FontSize', 26, 'FontWeight', 'bold', 'FontColor', C.accent);
+    subLbl = uilabel(hdr, 'Text', 'Not connected', 'FontColor', C.dim);
 
-    % ESRS gauge
-    gp = uipanel(g, 'Title', 'Eye Strain Risk Score', 'FontWeight', 'bold');
-    gp.Layout.Row = 1; gp.Layout.Column = 1;
-    gl = uigridlayout(gp, [2 1]); gl.RowHeight = {'1x', 30};
-    gauge = uigauge(gl, 'circular', 'Limits', [0 p.esrsMax], ...
-        'ScaleColors', [C.green; C.yellow; C.red], ...
-        'ScaleColorLimits', [0 p.levelYellow; p.levelYellow p.levelRed; p.levelRed p.esrsMax]);
-    levelLbl = uilabel(gl, 'Text', levelNames(1), 'HorizontalAlignment', 'center', ...
-                       'FontSize', 16, 'FontWeight', 'bold');
+    % ---- left column: connection, readings, zones
+    left = uigridlayout(root, [3 1], 'BackgroundColor', C.bg, 'Padding', [0 0 0 0]);
+    left.Layout.Row = 2; left.Layout.Column = 1;
+    left.RowHeight = {120, '1x', '1x'};
 
-    % LED mirror
-    lp = uipanel(g, 'Title', 'Device LEDs', 'FontWeight', 'bold');
-    lp.Layout.Row = 2; lp.Layout.Column = 1;
-    ll = uigridlayout(lp, [4 2]); ll.ColumnWidth = {40, '1x'};
-    lampG = uilamp(ll, 'Color', C.off); uilabel(ll, 'Text', 'Green - low risk (< 40)');
-    lampY = uilamp(ll, 'Color', C.off); uilabel(ll, 'Text', 'Yellow - rising (40-70)');
-    lampR = uilamp(ll, 'Color', C.off); uilabel(ll, 'Text', 'Red - take a break (> 70)');
-    lampP = uilamp(ll, 'Color', C.off); uilabel(ll, 'Text', 'Proximity - closer than 30 cm');
+    pc = darkPanel(left, 'CONNECTION');
+    gc = uigridlayout(pc, [2 3], 'BackgroundColor', C.panel);
+    gc.ColumnWidth = {'1x', '1x', '1x'};
+    portFld = uieditfield(gc, 'text', 'Value', char(port));
+    connLbl = uilabel(gc, 'Text', 'Disconnected', 'FontColor', C.red, 'FontWeight', 'bold');
+    uibutton(gc, 'Text', 'Simulate', 'BackgroundColor', [0.25 0.30 0.45], 'FontColor', 'w', ...
+        'ButtonPushedFcn', @(~, ~) startSim());
+    uibutton(gc, 'Text', 'Connect', 'BackgroundColor', [0.15 0.55 0.30], 'FontColor', 'w', ...
+        'FontWeight', 'bold', 'ButtonPushedFcn', @(~, ~) connect());
+    uibutton(gc, 'Text', 'Disconnect', 'BackgroundColor', [0.55 0.17 0.17], 'FontColor', 'w', ...
+        'FontWeight', 'bold', 'ButtonPushedFcn', @(~, ~) disconnect());
+    uibutton(gc, 'Text', 'Reset ESRS', 'ButtonPushedFcn', @(~, ~) resetEsrs());
 
-    % Trend plots
-    axS = uiaxes(g); axS.Layout.Row = 1; axS.Layout.Column = 2;
-    title(axS, 'ESRS over time'); ylabel(axS, 'ESRS'); xlabel(axS, 'time (min)');
-    ylim(axS, [0 p.esrsMax + 5]); grid(axS, 'on'); hold(axS, 'on');
-    plot(axS, [0 1e6], p.levelYellow * [1 1], '--', 'Color', C.yellow);
-    plot(axS, [0 1e6], p.levelRed * [1 1], '--', 'Color', C.red);
-    scoreLine = plot(axS, NaN, NaN, 'k-', 'LineWidth', 2);
+    pr = darkPanel(left, 'LIVE SENSOR READINGS');
+    gr = uigridlayout(pr, [5 2], 'BackgroundColor', C.panel);
+    gr.ColumnWidth = {110, '1x'};
+    distV  = readingRow(gr, 'Distance:');
+    humV   = readingRow(gr, 'Humidity:');
+    soundV = readingRow(gr, 'Sound:');
+    zoneV  = readingRow(gr, 'Zone:');
+    rateV  = readingRow(gr, 'ESRS rate:');
 
-    axD = uiaxes(g); axD.Layout.Row = 2; axD.Layout.Column = 2;
-    title(axD, 'Screen distance'); ylabel(axD, 'distance (cm)'); xlabel(axD, 'time (min)');
-    ylim(axD, [0 p.awayCm + 20]); grid(axD, 'on'); hold(axD, 'on');
-    plot(axD, [0 1e6], p.dangerCm * [1 1], '-', 'Color', C.red, 'LineWidth', 1.2);
-    plot(axD, [0 1e6], p.closeCm * [1 1], '--', 'Color', C.yellow, 'LineWidth', 1.2);
-    plot(axD, [0 1e6], p.awayCm * [1 1], ':', 'Color', C.off);
-    distLine = plot(axD, NaN, NaN, '-', 'Color', C.prox, 'LineWidth', 1.5);
-
-    % Readings
-    rp = uipanel(g, 'Title', 'Live readings', 'FontWeight', 'bold');
-    rp.Layout.Row = [1 2]; rp.Layout.Column = 3;
-    rl = uigridlayout(rp, [8 1]);
-    distLbl  = uilabel(rl, 'FontSize', 22, 'FontWeight', 'bold', 'Text', '-- cm');
-    zoneLbl  = uilabel(rl, 'FontSize', 14, 'Text', '');
-    noiseLbl = uilabel(rl, 'FontSize', 14, 'Text', 'Noise: --');
-    humLbl   = uilabel(rl, 'FontSize', 14, 'Text', 'Humidity: --');
-    tempLbl  = uilabel(rl, 'FontSize', 14, 'Text', 'Temperature: --');
-    multLbl  = uilabel(rl, 'FontSize', 14, 'FontWeight', 'bold', 'Text', 'ESRS multiplier: x1.00');
-    uilabel(rl, 'Text', '');
-    srcLbl   = uilabel(rl, 'FontColor', [0.4 0.4 0.4], 'WordWrap', 'on');
-
-    % Bottom bar
-    bb = uigridlayout(g, [1 4]); bb.Layout.Row = 3; bb.Layout.Column = [1 3];
-    bb.ColumnWidth = {140, 140, 200, '1x'}; bb.Padding = [0 0 0 0];
-    uibutton(bb, 'Text', 'Reset ESRS', 'ButtonPushedFcn', @(~, ~) onReset());
-    uibutton(bb, 'Text', 'Clear plots', 'ButtonPushedFcn', @(~, ~) clearHistory());
-    if live
-        uilabel(bb, 'Text', '');
-    else
-        speedDd = uidropdown(bb, 'Items', {'1x real time', '5x', '20x', '60x'}, ...
-            'ItemsData', [1 5 20 60], 'Value', simSpeed, ...
-            'ValueChangedFcn', @(dd, ~) setSpeed(dd.Value)); %#ok<NASGU>
-    end
-    statusLbl = uilabel(bb, 'Text', '', 'FontColor', [0.4 0.4 0.4]);
-
-    % ---------------------------------------------------------------- source
-    if live
-        try
-            sp = serialport(port, baud, 'Timeout', 0.5);
-            configureTerminator(sp, "CR/LF");
-            flush(sp);
-            srcLbl.Text = sprintf('Source: Arduino on %s @ %d baud', port, baud);
-        catch err
-            uialert(fig, sprintf('Could not open %s:\n%s', port, err.message), 'Serial error');
-            srcLbl.Text = 'Source: not connected';
-        end
-    else
-        srcLbl.Text = 'Source: simulated study session (run with a port name for live data)';
+    pz = darkPanel(left, 'PROXIMITY ZONES');
+    gz = uigridlayout(pz, [5 1], 'BackgroundColor', C.panel);
+    zoneText = { ...
+        sprintf('<  30 cm      Immediate Danger  (+%.1f/min, amber blinks)', p.rate_under30), ...
+        sprintf('30-40 cm     Fast Strain  (+%.1f/min)', p.rate_30_40), ...
+        sprintf('40-60 cm     Moderate Strain  (+%.1f/min)', p.rate_40_60), ...
+        sprintf('60-100 cm   Mild Strain  (+%.1f/min)', p.rate_60_100), ...
+        sprintf('> 100 cm     Recovery  (%.1f/min)', p.rate_over100)};
+    for z = 1:5
+        uilabel(gz, 'Text', ['■  ' zoneText{z}], 'FontColor', zoneColors(z, :));
     end
 
-    tmr = timer('ExecutionMode', 'fixedSpacing', 'Period', 0.1, ...
-                'BusyMode', 'drop', 'TimerFcn', @(~, ~) onTick());
+    % ---- middle column: gauge + LEDs
+    mid = uigridlayout(root, [2 1], 'BackgroundColor', C.bg, 'Padding', [0 0 0 0]);
+    mid.Layout.Row = 2; mid.Layout.Column = 2;
+    mid.RowHeight = {'1.2x', '1x'};
+
+    pg = darkPanel(mid, 'EYE STRAIN RISK SCORE');
+    gg = uigridlayout(pg, [3 1], 'BackgroundColor', C.panel);
+    gg.RowHeight = {'1x', 36, 28};
+    gauge = uigauge(gg, 'semicircular', 'Limits', [p.riskMin p.riskMax], ...
+        'BackgroundColor', C.panel, 'FontColor', C.text, ...
+        'ScaleColors', [C.green; 1 0.85 0.2; C.red], ...
+        'ScaleColorLimits', [0 35; 35 p.riskThreshold; p.riskThreshold p.riskMax]);
+    scoreLbl = uilabel(gg, 'Text', '0', 'FontSize', 30, 'FontWeight', 'bold', ...
+        'HorizontalAlignment', 'center', 'FontColor', C.green);
+    stateLbl = uilabel(gg, 'Text', 'SAFE', 'FontSize', 18, 'FontWeight', 'bold', ...
+        'HorizontalAlignment', 'center', 'FontColor', C.green);
+
+    po = darkPanel(mid, 'OUTPUT INDICATORS');
+    go = uigridlayout(po, [3 3], 'BackgroundColor', C.panel);
+    go.RowHeight = {24, 60, '1x'};
+    for nm = ["GREEN", "AMBER", "RED"]
+        uilabel(go, 'Text', nm, 'HorizontalAlignment', 'center', 'FontColor', C.text);
+    end
+    lampG = uilamp(go, 'Color', C.green);
+    lampA = uilamp(go, 'Color', C.off);
+    lampR = uilamp(go, 'Color', C.off);
+    lastLine = uilabel(go, 'Text', 'Last serial line:', 'FontColor', C.dim, 'FontSize', 10);
+    lastLine.Layout.Column = [1 3];
+
+    % ---- right column: live plots
+    pd = darkPanel(root, 'LIVE DATA');
+    pd.Layout.Row = 2; pd.Layout.Column = 3;
+    gd = uigridlayout(pd, [2 1], 'BackgroundColor', C.panel);
+    axD = darkAxes(gd, 'Distance (cm)', 'cm', [0 150]);
+    for b = [p.dangerCm p.fastCm p.moderateCm p.mildCm]
+        plot(axD, [-windowS 0], [b b], ':', 'Color', C.dim);
+    end
+    distLine = plot(axD, NaN, NaN, '-', 'Color', C.blue, 'LineWidth', 1.8);
+    axE = darkAxes(gd, 'ESRS', 'Score', [0 105]);
+    plot(axE, [-windowS 0], p.riskThreshold * [1 1], '--', 'Color', C.red);
+    text(axE, -windowS + 1, p.riskThreshold + 5, 'RED LED', 'Color', C.red, 'FontSize', 9);
+    esrsLine = plot(axE, NaN, NaN, '-', 'Color', C.amber, 'LineWidth', 1.8);
+
+    footer = uilabel(root, 'Text', 'Live mode - Arduino handles all sensor logic, MATLAB visualises', ...
+        'FontColor', C.dim, 'FontSize', 10);
+    footer.Layout.Row = 3; footer.Layout.Column = [1 3];
+
+    tmr = timer('ExecutionMode', 'fixedSpacing', 'Period', 0.1, 'BusyMode', 'drop', ...
+                'TimerFcn', @(~, ~) onTick());
     fig.CloseRequestFcn = @(~, ~) onClose();
     start(tmr);
+    if autoConnect, connect(); end
 
-    % =================================================================== logic
+    % ================================================================== logic
+    function connect()
+        disconnect();
+        try
+            sp = serialport(portFld.Value, baud, 'Timeout', 0.5);
+            configureTerminator(sp, "CR/LF");
+            flush(sp);
+            mode = "live"; clearHistory();
+            connLbl.Text = 'Connected'; connLbl.FontColor = C.green;
+            subLbl.Text = sprintf('LIVE - reading sensors from Arduino on %s', portFld.Value);
+            footer.Text = 'Live mode - Arduino handles all sensor logic, MATLAB visualises';
+        catch err
+            uialert(fig, sprintf('Could not open %s:\n%s', portFld.Value, err.message), 'Serial error');
+        end
+    end
+
+    function disconnect()
+        if ~isempty(sp), try, delete(sp); catch, end, end
+        sp = []; mode = "idle";
+        connLbl.Text = 'Disconnected'; connLbl.FontColor = C.red;
+        subLbl.Text = 'Not connected';
+    end
+
+    function startSim()
+        disconnect();
+        mode = "sim"; simEsrs = 0; simT = 0; clearHistory();
+        connLbl.Text = 'Simulating'; connLbl.FontColor = C.amber;
+        subLbl.Text = sprintf('SIMULATION - scripted study session at %dx speed (esrsStep)', simSpeed);
+        footer.Text = 'Simulation mode - same ESRS logic as the firmware and the Simulink model';
+    end
+
+    function resetEsrs()
+        if mode == "live", write(sp, 'r', 'char'); else, simEsrs = 0; end
+    end
+
     function onTick()
         if ~isvalid(fig), return; end
         try
-            if live
-                readSerial();
-            else
-                stepSimulation();
+            switch mode
+                case "live", readSerial();
+                case "sim",  stepSimulation();
             end
-            refreshBlink();
+            blink();
         catch err
-            statusLbl.Text = ['Error: ' err.message];
+            lastLine.Text = ['Error: ' err.message];
         end
     end
 
     function readSerial()
-        if isempty(sp), return; end
         newest = [];
-        while sp.NumBytesAvailable > 0
+        while ~isempty(sp) && sp.NumBytesAvailable > 0
             ln = readline(sp);
-            if isempty(ln), break; end          % timed out on a partial line
+            if isempty(ln), break; end                % timed out on a partial line
             ln = strtrim(ln);
+            lastLine.Text = "Last serial line: " + ln;
             if startsWith(ln, "D,")
                 v = str2double(split(extractAfter(ln, 2), ","));
-                if numel(v) == 10 && all(~isnan(v))
+                if numel(v) == 11 && all(~isnan(v))
                     newest = v;
-                    push(v(1) / 1000, v(7), v(2), v(9));
+                    push(v(1) / 1000, v(7), v(2));
                 end
-            elseif strlength(ln) > 0
-                statusLbl.Text = char(ln);   % firmware comments / acks
             end
         end
         if ~isempty(newest)
-            % t, dist, noise, hum, temp, mult, esrs, zone, level, prox
-            render(newest(2), newest(3), newest(4), newest(5), newest(6), ...
-                   newest(7), newest(8), newest(9), newest(10));
+            % t, dist, hum, noise, temp, rate, esrs, zone(0-4), green, amber, red
+            render(newest(2), newest(3), newest(4), newest(6), newest(7), ...
+                   newest(8) + 1, newest(9), newest(10), newest(11));
         end
     end
 
     function stepSimulation()
-        nSteps = max(1, round(simSpeed * 0.1 / p.tickS));
-        for k = 1:nSteps
-            [d, noiseRaw, hum] = demoInputs(simT);
-            simNoise = simNoise + 0.15 * (noiseRaw - simNoise);
-            [simState, o] = esrsStep(simState, d, simNoise, hum, p.tickS, p);
-            simT = simT + p.tickS;
+        for k = 1:round(simSpeed * 0.1)              % 1 s ESRS steps
+            [d, hum, noiseRaw] = demoInputs(simT);
+            simNoise = simNoise + 0.3 * (noiseRaw - simNoise);
+            [simEsrs, o] = esrsStep(simEsrs, d, hum, simNoise, 1, p);
+            simT = simT + 1;
         end
-        push(simT, o.score, d, o.level);
-        render(d, simNoise, hum, 21.5, o.multiplier, o.score, o.zone, o.level, o.prox);
+        push(simT, simEsrs, d);
+        render(d, hum, simNoise, o.ratePerMin, simEsrs, o.zone, o.green, o.amber, o.red);
     end
 
-    function push(t, score, dist, level)
-        H.t(end+1) = t; H.score(end+1) = score; H.dist(end+1) = dist; H.level(end+1) = level;
-        keep = H.t >= t - windowS;
-        H.t = H.t(keep); H.score = H.score(keep); H.dist = H.dist(keep); H.level = H.level(keep);
+    function push(t, esrs, dist)
+        H.t(end+1) = t; H.esrs(end+1) = esrs; H.dist(end+1) = dist;
+        keep = H.t >= t - windowS * ifelse(mode == "sim", simSpeed / 10, 1);
+        H.t = H.t(keep); H.esrs = H.esrs(keep); H.dist = H.dist(keep);
     end
 
-    function render(dist, noise, hum, temp, mult, score, zone, level, prox)
-        gauge.Value = score;
-        levelLbl.Text = levelNames(level + 1);
-        levelColours = [C.green; C.yellow * 0.8; C.red; C.red];
-        levelLbl.FontColor = levelColours(level + 1, :);
+    function render(dist, hum, noise, rate, esrs, zone, green, amber, red)
+        distV.Text  = sprintf('%.1f cm', dist);
+        humV.Text   = sprintf('%.0f %%  (%s)', hum, ifelse(hum < p.dryHumidityThreshold, 'Dry', 'Normal'));
+        soundV.Text = ifelse(noise >= p.highNoiseThreshold, 'Noisy', 'Quiet');
+        soundV.FontColor = ifelse(noise >= p.highNoiseThreshold, C.amber, C.green);
+        zoneV.Text  = char(zoneNames(zone));
+        zoneV.FontColor = zoneColors(zone, :);
+        rateV.Text  = sprintf('%+.2f / min', rate);
 
-        lampG.Color = ifelse(level == 0, C.green, C.off);
-        lampY.Color = ifelse(level == 1, C.yellow, C.off);
-        lampR.Color = ifelse(level == 2 || (level == 3 && lastBlink), C.red, C.off);
-        lampP.Color = ifelse(prox, C.prox, C.off);
-        lampR.UserData = level;
-
-        if dist > 0, distLbl.Text = sprintf('%.1f cm', dist); else, distLbl.Text = 'no echo'; end
-        zoneLbl.Text = zoneNames(zone + 1);
-        noiseLbl.Text = sprintf('Noise: %.0f %s', noise, ifelse(noise > p.noiseThreshold, '(loud x1.25)', '(quiet)'));
-        if hum >= 0
-            humLbl.Text = sprintf('Humidity: %.0f %% %s', hum, ifelse(hum < p.humidityLowPct, '(dry x1.30)', ''));
-        else
-            humLbl.Text = 'Humidity: waiting for sensor';
+        gauge.Value = esrs;
+        scoreLbl.Text = sprintf('%.0f', esrs);
+        if red,       s = 'TAKE A BREAK'; c = C.red;
+        elseif amber, s = 'TOO CLOSE';    c = C.amber;
+        elseif esrs >= 35, s = 'RISING';  c = [1 0.85 0.2];
+        else,         s = 'SAFE';         c = C.green;
         end
-        tempLbl.Text = sprintf('Temperature: %.1f %sC', temp, char(176));
-        multLbl.Text = sprintf('ESRS multiplier: x%.2f', mult);
+        stateLbl.Text = s; stateLbl.FontColor = c; scoreLbl.FontColor = c;
+        st = struct('green', logical(green), 'amber', logical(amber), 'red', logical(red));
 
-        tm = (H.t - H.t(end)) / 60;      % minutes, "now" at 0
-        d = H.dist; d(d <= 0) = NaN;
-        set(scoreLine, 'XData', tm, 'YData', H.score);
-        set(distLine,  'XData', tm, 'YData', d);
-        xlim(axS, [-windowS/60 0]); xlim(axD, [-windowS/60 0]);
-        statusLbl.Text = sprintf('t = %s', char(duration(0, 0, H.t(end), 'Format', 'hh:mm:ss')));
+        tt = H.t - H.t(end);
+        if mode == "sim", tt = tt / (simSpeed / 10); end    % compress to the 60 s window
+        set(distLine, 'XData', tt, 'YData', min(H.dist, 150));
+        set(esrsLine, 'XData', tt, 'YData', H.esrs);
     end
 
-    function refreshBlink()
-        % toggle every half blink period (firmware BLINK_PERIOD_MS = 400)
-        lastBlink = mod(floor(posixtime(datetime('now')) * 1000 / 200), 2) == 1;
-        if isequal(lampR.UserData, 3)
-            lampR.Color = ifelse(lastBlink, C.red, C.off);
-        end
-    end
-
-    function onReset()
-        if live && ~isempty(sp)
-            write(sp, 'r', 'char');
-        else
-            simState = esrsInit();
-        end
+    function blink()
+        on = mod(floor(posixtime(datetime('now')) * 4), 2) == 1;   % 2 Hz, like the LEDs
+        lampG.Color = ifelse(st.green, C.green, C.off);
+        lampA.Color = ifelse(st.amber && on, C.amber, C.off);
+        lampR.Color = ifelse(st.red && on, C.red, C.off);
     end
 
     function clearHistory()
-        H = struct('t', [], 'score', [], 'dist', [], 'level', []);
-    end
-
-    function setSpeed(v)
-        simSpeed = v;
+        H = struct('t', [], 'esrs', [], 'dist', []);
     end
 
     function onClose()
         try, stop(tmr); delete(tmr); catch, end
-        try, delete(sp); catch, end
+        disconnect();
         delete(fig);
     end
 
+    % ------------------------------------------------------- UI helpers
+    function pnl = darkPanel(parent, titleText)
+        pnl = uipanel(parent, 'Title', titleText, 'FontWeight', 'bold', ...
+            'BackgroundColor', C.panel, 'ForegroundColor', C.accent, 'BorderType', 'line');
+    end
+
+    function v = readingRow(g, name)
+        uilabel(g, 'Text', name, 'FontColor', C.text);
+        v = uilabel(g, 'Text', '--', 'FontColor', C.blue, 'FontSize', 15, 'FontWeight', 'bold');
+    end
+
+    function ax = darkAxes(parent, ttl, yl, lims)
+        ax = uiaxes(parent, 'Color', [0.12 0.13 0.17], 'XColor', C.dim, 'YColor', C.dim);
+        ax.Title.String = ttl; ax.Title.Color = C.text;
+        ylabel(ax, yl); xlabel(ax, 'Time (s)');
+        xlim(ax, [-windowS 0]); ylim(ax, lims); grid(ax, 'on'); hold(ax, 'on');
+    end
+
     % ------------------------------------------------------- simulated input
-    function [d, noise, hum] = demoInputs(t)
-        tt = mod(t, demo.total);
-        i = find(tt < demo.ends, 1);
-        seg = demo.seg(i, :);
-        d = seg(2);
-        if d > 0, d = d + 1.5 * sin(t * 1.7) + 0.8 * sin(t * 5.3); end
-        noise = seg(3) + 15 * sin(t * 3.1);
-        hum = seg(4);
+    function [d, hum, noise] = demoInputs(t)
+        tt = mod(t / 60, demo.total);
+        s = demo.seg(find(tt < demo.ends, 1), :);
+        d = s(2); if d <= 100, d = d + 1.5 * sin(t / 7); end
+        hum = s(3);
+        noise = s(4) + 0.05 * sin(t / 3);
     end
 end
 
 % ============================================================================
 function demo = demoSession()
-    % [duration_s, distance_cm, noise, humidity] - loops forever
+    % [duration_min, distance_cm, humidity_pct, noise] - loops forever
     demo.seg = [ ...
-        8*60,  62,  60, 50;   % healthy posture
-        5*60,  42,  60, 50;   % drifting closer
-        2*60,  25, 320, 32;   % leaning in, noisy dry room
-          25,   0,  60, 50;   % short break
-        6*60,  60, 320, 32;   % back to work in a noisy, dry library
-          40,   0,  60, 50];  % proper break
+        3   70  50  0.2;    % healthy distance
+        6   35  28  0.2;    % leaning in, dry room -> fast strain
+        2   25  28  0.2;    % danger zone -> amber blinks, red soon after
+        6   120 50  0.2;    % break: recovery
+        8   50  55  0.8;    % noisy library at 50 cm
+        5   120 50  0.2];   % break
     demo.ends = cumsum(demo.seg(:, 1));
     demo.total = demo.ends(end);
 end

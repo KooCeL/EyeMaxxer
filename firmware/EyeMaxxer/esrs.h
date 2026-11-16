@@ -1,124 +1,100 @@
 // =============================================================================
 //  EyeMaxxer - Eye Strain Risk Score (ESRS) engine
 //
-//  Pure C++ with no Arduino dependencies, so the exact same code runs on the
-//  board and in the host-side unit tests (tests/test_esrs.cpp).
+//  C++ port of the team's ESRS_Update MATLAB Function block
+//  (simulink/simulink_eyestrain.slx, also matlab/eye_strain_sim.m).
+//  Pure C++ with no Arduino dependencies, so the same code runs on the board
+//  and in the host-side unit tests (tests/test_esrs.cpp).
 //
-//  Every tick:
-//    1. Classify the screen distance into a zone (DANGER / CLOSE / OK / AWAY).
-//    2. If the user is at the screen:
-//         ESRS += base_rate(zone) * noise_mult * humidity_mult * dt
-//       If the user has been away for longer than AWAY_DEBOUNCE_S:
-//         ESRS -= RATE_RECOVERY * dt          (taking a break lets eyes recover)
-//    3. Clamp to [0, ESRS_MAX] and map the score to an LED level with hysteresis.
+//  Each tick of dt seconds:
+//    deltaPerMin = rate(distance zone)
+//    if distance < 60 cm: deltaPerMin *= 1.30 if dry, *= 1.20 if noisy
+//    ESRS = clamp(ESRS + deltaPerMin * dt / 60, 0, 100)
+//
+//  Alerts:
+//    amber LED blinks  while distance < 30 cm      (Immediate_Alert)
+//    red   LED blinks  while ESRS >= 70            (ESRS Alert)
+//    green LED on      while ESRS == 0             (RestDone)
 // =============================================================================
 #pragma once
 #include "config.h"
 
-enum Zone : unsigned char { ZONE_AWAY = 0, ZONE_DANGER = 1, ZONE_CLOSE = 2, ZONE_OK = 3 };
-enum Level : unsigned char { LEVEL_LOW = 0, LEVEL_RISING = 1, LEVEL_HIGH = 2, LEVEL_BREAK_OVERDUE = 3 };
+enum Zone : unsigned char {
+  ZONE_DANGER = 0,    // < 30 cm
+  ZONE_FAST = 1,      // 30-40 cm
+  ZONE_MODERATE = 2,  // 40-60 cm
+  ZONE_MILD = 3,      // 60-100 cm
+  ZONE_RECOVERY = 4   // > 100 cm (or no echo)
+};
 
 struct EsrsInputs {
-  float distanceCm;   // <= 0 means "no echo"
-  float noiseLevel;   // smoothed mic peak-to-peak, ADC counts
-  float humidityPct;  // < 0 means "no valid reading yet"
+  float distanceCm;   // <= 0 means "no echo" and is treated as away (recovery)
+  float humidityPct;  // < 0 means "no valid reading yet" (never counts as dry)
+  float noiseLevel;   // normalised 0..1
 };
 
 struct EsrsOutputs {
   float score;
-  float multiplier;   // combined environmental multiplier applied this tick
+  float ratePerMin;   // rate actually applied this tick, after multipliers
   Zone zone;
-  Level level;
-  bool proximityWarning;
-  bool noisy;
   bool dry;
+  bool noisy;
+  bool greenLed;      // steady
+  bool amberAlert;    // blink
+  bool redAlert;      // blink
 };
 
 class EsrsEngine {
  public:
-  EsrsEngine() { reset(); }
+  EsrsEngine() : score_(ESRS_MIN) {}
 
-  void reset() {
-    score_ = 0.0f;
-    awayTime_ = 0.0f;
-    level_ = LEVEL_LOW;
-  }
+  void reset() { score_ = ESRS_MIN; }
+  float score() const { return score_; }
 
   static Zone classify(float d) {
-    if (d <= 0.0f || d > AWAY_CM) return ZONE_AWAY;
-    if (d < DANGER_CM) return ZONE_DANGER;
-    if (d < CLOSE_CM) return ZONE_CLOSE;
-    return ZONE_OK;
+    if (d <= 0.0f) return ZONE_RECOVERY;  // no echo: nobody in front of the screen
+    if (d < ZONE_DANGER_CM) return ZONE_DANGER;
+    if (d < ZONE_FAST_CM) return ZONE_FAST;
+    if (d < ZONE_MODERATE_CM) return ZONE_MODERATE;
+    if (d <= ZONE_MILD_CM) return ZONE_MILD;
+    return ZONE_RECOVERY;
   }
 
   static float baseRate(Zone z) {
     switch (z) {
-      case ZONE_DANGER: return RATE_DANGER;
-      case ZONE_CLOSE:  return RATE_CLOSE;
-      case ZONE_OK:     return RATE_OK;
-      default:          return 0.0f;
+      case ZONE_DANGER:   return RATE_UNDER_30;
+      case ZONE_FAST:     return RATE_30_40;
+      case ZONE_MODERATE: return RATE_40_60;
+      case ZONE_MILD:     return RATE_60_100;
+      default:            return RATE_OVER_100;
     }
   }
 
   EsrsOutputs update(const EsrsInputs& in, float dtSeconds) {
     EsrsOutputs out;
     out.zone = classify(in.distanceCm);
-    out.noisy = in.noiseLevel > NOISE_THRESHOLD;
-    out.dry = in.humidityPct >= 0.0f && in.humidityPct < HUMIDITY_LOW_PCT;
-    out.multiplier = (out.noisy ? NOISE_MULT : 1.0f) * (out.dry ? HUMIDITY_MULT : 1.0f);
+    out.dry = in.humidityPct >= 0.0f && in.humidityPct < DRY_HUMIDITY_PCT;
+    out.noisy = in.noiseLevel >= HIGH_NOISE_LEVEL;
 
-    if (out.zone == ZONE_AWAY) {
-      awayTime_ += dtSeconds;
-      if (awayTime_ >= AWAY_DEBOUNCE_S) score_ -= RATE_RECOVERY * dtSeconds;
-    } else {
-      awayTime_ = 0.0f;
-      score_ += baseRate(out.zone) * out.multiplier * dtSeconds;
+    float rate = baseRate(out.zone);
+    bool inMultRange = in.distanceCm > 0.0f && in.distanceCm < MULT_MAX_CM;
+    if (inMultRange) {
+      if (out.dry) rate *= DRY_MULT;
+      if (out.noisy) rate *= NOISE_MULT;
     }
+    out.ratePerMin = rate;
 
-    if (score_ < 0.0f) score_ = 0.0f;
+    score_ += rate * (dtSeconds / 60.0f);
     if (score_ > ESRS_MAX) score_ = ESRS_MAX;
-
-    level_ = nextLevel(level_, score_);
+    if (score_ < ESRS_MIN) score_ = ESRS_MIN;
 
     out.score = score_;
-    out.level = level_;
-    out.proximityWarning = (out.zone == ZONE_DANGER);
+    out.greenLed = (score_ == ESRS_MIN);
+    out.amberAlert = (out.zone == ZONE_DANGER);
+    out.redAlert = (score_ >= ESRS_RED);
     return out;
   }
 
-  float score() const { return score_; }
-
  private:
-  // Thresholds for entering each level; a level is only left once the score
-  // falls LEVEL_HYSTERESIS below the threshold that entered it.
-  static float enterThreshold(Level l) {
-    switch (l) {
-      case LEVEL_RISING:        return LEVEL_YELLOW;
-      case LEVEL_HIGH:          return LEVEL_RED;
-      case LEVEL_BREAK_OVERDUE: return LEVEL_OVERDUE;
-      default:                  return 0.0f;
-    }
-  }
-
-  static Level rawLevel(float s) {
-    if (s >= LEVEL_OVERDUE) return LEVEL_BREAK_OVERDUE;
-    if (s >= LEVEL_RED)     return LEVEL_HIGH;
-    if (s >= LEVEL_YELLOW)  return LEVEL_RISING;
-    return LEVEL_LOW;
-  }
-
-  static Level nextLevel(Level current, float s) {
-    Level raw = rawLevel(s);
-    if (raw >= current) return raw;  // rising: switch immediately
-    // falling: step down only once clearly below the current level's threshold
-    Level l = current;
-    while (l > raw && s < enterThreshold(l) - LEVEL_HYSTERESIS) {
-      l = static_cast<Level>(l - 1);
-    }
-    return l;
-  }
-
   float score_;
-  float awayTime_;
-  Level level_;
 };

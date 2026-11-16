@@ -1,147 +1,166 @@
 <div align="center">
 
+![EyeMaxxer - Putting an end to your eye strain](docs/images/cover.jpg)
+
 # 👁️ EyeMaxxer
 
-**An Arduino-powered, MATLAB-integrated system that fights digital eye strain.**
+**An Arduino-powered, MATLAB-integrated clip-on device that fights digital eye strain.**
 
 🥈 **2nd Place** &nbsp;·&nbsp; 🏆 **MATLAB Integration Award**
 
-*MechSoc Imperial College London × Cambridge University Engineering Society Make-a-thon on Student Wellbeing*
+*MechSoc Imperial College London × Cambridge University Engineering Society (CUES) Make-a-thon on Student Wellbeing*
 
-![Arduino](https://img.shields.io/badge/Arduino-Uno%20%7C%20Nano-00979D?logo=arduino&logoColor=white)
+![Arduino](https://img.shields.io/badge/Arduino-Nano%20%7C%20Uno-00979D?logo=arduino&logoColor=white)
 ![MATLAB](https://img.shields.io/badge/MATLAB-Simulink%20%7C%20App%20UI-E16737?logo=mathworks&logoColor=white)
 ![C++](https://img.shields.io/badge/C%2B%2B-firmware-00599C?logo=cplusplus&logoColor=white)
 [![CI](https://github.com/KooCeL/EyeMaxxer/actions/workflows/ci.yml/badge.svg)](https://github.com/KooCeL/EyeMaxxer/actions/workflows/ci.yml)
 
-🔗 [Project link](https://lnkd.in/daBxs7n5)
+🔗 [Project link](https://lnkd.in/daBxs7n5) &nbsp;·&nbsp; 📑 [Presentation slides (PDF)](docs/EyeMaxxer_presentation.pdf)
 
 </div>
 
 ---
 
-> 📅 **April 2026.** Built over one weekend in Cambridge, about **7 months before
-> this repository was curated (November 2026)**, by a team made up entirely of
-> first-year students.
+> 📅 Built over one weekend in Cambridge, **about 7 months before this repository
+> was curated (November 2026)**, by a team made up entirely of first-year students.
 
 ## The problem
 
-Students spend hours a day in front of laptops, often hunched in close and
-skipping breaks, in dry, noisy libraries. All of this adds up to **digital eye
-strain**: tired, dry eyes, headaches and blurred vision. Most people only notice
-it once it already hurts.
+A study at Imam Abdulrahman University found that **68.53 % of students
+had symptoms of digital eye strain (DES)**: 43.2 % mild and 11 % severe
+(AlQarni et al., 2023). The two big drivers are **prolonged screen time** and
+**close viewing distance**, and students rarely notice either until their eyes
+already hurt.
 
-## What EyeMaxxer does
+## The solution
 
-EyeMaxxer clips onto a laptop and gives you an early, glanceable warning
-**before** strain builds up.
+EyeMaxxer clips onto the top of a laptop and keeps an eye on *how* you use your screen.
 
-- 📏 **Measures your screen distance continuously** with a laptop-mounted ultrasonic sensor.
-- 🧮 **Computes an Eye Strain Risk Score (ESRS)**, which rises with screen exposure and
-  rises faster the closer you sit. It falls again when you step away for a real break.
-- 🌫️ **Is context-aware.** Ambient **noise** and **low humidity** act as multipliers on
-  the ESRS increment, so strain builds faster in a dry, noisy room.
-- 🚦 **Warns you on two time scales:**
-  - an *immediate* proximity LED when you sit closer than **30 cm**, and
-  - a green → yellow → red (→ blinking) LED bar for the strain *accumulated over time*.
-- 📊 **Streams live data to a MATLAB dashboard** showing the real-time ESRS, screen distance and LED status.
-- 🔋 **Works fully offline** on a battery pack, so it's portable for everyday use.
+| | |
+|---|---|
+| ![CAD design of the clip-on housing](docs/images/cad-design.jpg) | ![The prototype components](docs/images/components.jpg) |
+
+- 📏 **A laptop-mounted ultrasonic sensor** measures your distance from the screen continuously.
+- 🧮 **The Eye Strain Risk Score (ESRS)** goes up at a rate set by how close you sit,
+  and comes back down when you step away (> 100 cm).
+- 🌫️ **It's context-aware:** **low humidity** (× 1.30) and **ambient noise** (× 1.20) speed
+  up strain build-up whenever you sit closer than 60 cm.
+- 🚦 **Three LEDs** warn on two time scales:
+  - 🟠 **amber blinks immediately** if you sit closer than **30 cm**,
+  - 🔴 **red blinks** once the accumulated ESRS reaches **70**,
+  - 🟢 **green stays on** while you're fully rested (ESRS = 0).
+- 📊 **A live MATLAB GUI** shows the real-time ESRS, screen distance and LED status.
+- 🔋 **It works fully offline** on a battery pack, so it's portable for everyday use.
 
 ```mermaid
 flowchart LR
     US["📏 HC-SR04<br/>screen distance"] --> MCU
-    MIC["🎤 Sound sensor<br/>ambient noise"] --> MCU
-    DHT["💧 DHT11<br/>humidity / temp"] --> MCU
-    MCU["Arduino Uno / Nano<br/><b>ESRS engine</b>"] --> LED["🚦 Green / Yellow / Red<br/>accumulated risk"]
-    MCU --> PROX["🔵 Proximity LED<br/>&lt; 30 cm danger"]
-    MCU -- "USB serial (5 Hz)" --> UI["💻 MATLAB live dashboard"]
+    MIC["🎤 Microphone<br/>ambient noise"] --> MCU
+    DHT["💧 DHT11<br/>humidity"] --> MCU
+    MCU["Arduino Nano<br/><b>ESRS logic</b>"] --> G["🟢 Green<br/>ESRS = 0"]
+    MCU --> A["🟠 Amber<br/>&lt; 30 cm"]
+    MCU --> R["🔴 Red<br/>ESRS ≥ 70"]
+    MCU -- "USB serial" --> UI["💻 MATLAB live GUI"]
     BAT["🔋 Battery pack"] -.-> MCU
 ```
 
 ## The Eye Strain Risk Score
 
-Every 100 ms the score is updated:
-
+```matlab
+deltaPerMin = rate(distance zone);
+if distance_cm < 60
+    if humidity_pct < 40,  deltaPerMin = deltaPerMin * 1.30; end   % dry
+    if noise_level >= 0.6, deltaPerMin = deltaPerMin * 1.20; end   % noisy
+end
+ESRS = clamp(ESRS + deltaPerMin * dt/60, 0, 100);
 ```
-ESRS += base_rate(distance zone) × noise_multiplier × humidity_multiplier × dt     (at the screen)
-ESRS -= recovery_rate × dt                                                        (away > 2 s)
-```
 
-| Zone | Distance | Rate | | Condition | Multiplier |
-|---|---|---:|---|---|---:|
-| 🔴 Danger | < 30 cm | +0.40 /s | | Noise above threshold | × 1.25 |
-| 🟠 Close | 30–50 cm | +0.12 /s | | Humidity < 40 % | × 1.30 |
-| 🟢 OK | 50–120 cm | +0.05 /s | | | |
-| 💤 Away | > 120 cm | −3.5 /s | | | |
+| Distance | Zone | ESRS / min |
+|---|---|---:|
+| < 30 cm | 🔴 Immediate danger (amber LED blinks) | +15.0 |
+| 30–40 cm | 🟠 Fast strain | +4.5 |
+| 40–60 cm | 🟡 Moderate strain | +2.0 |
+| 60–100 cm | 🟢 Mild strain | +0.1 |
+| > 100 cm | 🔵 Recovery | −6.0 |
 
-| ESRS | 0–40 | 40–70 | 70–90 | 90–100 |
-|---|---|---|---|---|
-| **LED** | 🟢 low risk | 🟡 rising | 🔴 take a break | 🔴 blinking, overdue |
+For example, at 35 cm the red LED comes on after **20.4 min** in a humid room but after
+**16.9 min** in a dry one. → Full details and all five scenarios are in
+[`docs/esrs-algorithm.md`](docs/esrs-algorithm.md).
 
-With these settings, a healthy posture reaches red in about **23 minutes**. A noisy, dry room
-cuts that to about **14 minutes**, and leaning in under 30 cm gets there in about **3 minutes**.
-A 20-second break after 20 minutes (the **20-20-20 rule**) resets the score.
-→ Full details in [`docs/esrs-algorithm.md`](docs/esrs-algorithm.md).
+## MATLAB integration 🏆
 
-## MATLAB integration (MATLAB Integration Award 🏆)
+MATLAB integration was done in three stages, and it won the MATLAB Integration Award:
 
-MATLAB integration was done in three stages:
+### 1️⃣ Embedded control logic in Simulink
 
-1. **Embedded control logic in Simulink.** The sensing → ESRS → LED pipeline was
-   designed in Simulink and deployed to an Arduino Nano.
-   See [`simulink/`](simulink/README.md).
-2. **Scenario testing in MATLAB.** The algorithm was validated against realistic study
-   sessions (good posture, leaning in, a noisy dry library, 20-20-20 breaks, quick
-   glances away) before trusting the hardware. See [`matlab/runScenarioTests.m`](matlab/runScenarioTests.m).
-3. **Live graphical UI.** A MATLAB app shows the real-time ESRS gauge and trend,
-   the screen distance, the environment readings and the LED status.
-   See [`matlab/EyeMaxxerDashboard.m`](matlab/EyeMaxxerDashboard.m).
+The ESRS logic was designed as a MATLAB Function block with a Unit Delay feedback
+loop, plus Compare blocks for the three LEDs, targeting the Arduino Nano.
+→ [`simulink/`](simulink/README.md)
 
-The plan was to demo the GUI with simulated data. The team pushed further and
-got **complete real-time hardware integration** working: the dashboard is driven
-live by the Arduino over serial.
+![Simulink logic map](docs/images/simulink-logic-map.jpg)
 
-![ESRS scenario test results](docs/images/scenario_results.png)
+### 2️⃣ Scenario testing in MATLAB
+
+[`matlab/eye_strain_sim.m`](matlab/eye_strain_sim.m) runs five scenarios to check
+the behaviour before trusting the hardware: the danger zone, fast build-up in dry
+vs humid air, a noisy environment, and recovery during a break.
+
+![Scenario 2 - fast accumulation at 35 cm in dry air](docs/images/scenario2-dry.jpg)
+
+### 3️⃣ Live graphical UI
+
+A MATLAB GUI shows the real-time ESRS gauge, live distance and ESRS plots,
+sensor readings, proximity zones and LED status.
+
+![THE EyeMaxxer live MATLAB GUI](docs/images/matlab-gui.jpg)
+
+The plan was to demo the GUI with simulated data. The team pushed further and got
+**complete real-time hardware integration** working: the Arduino handles all the
+sensor logic and MATLAB visualises it live over serial.
 
 ## Repository layout
 
 ```
 EyeMaxxer/
-├── firmware/EyeMaxxer/      Arduino sketch (Uno / Nano)
-│   ├── EyeMaxxer.ino        sensors, scheduler, LEDs, serial telemetry
-│   ├── esrs.h               ESRS engine (pure C++, no Arduino deps)
-│   └── config.h             pin map + all tuning constants
+├── simulink/
+│   └── simulink_eyestrain.slx   original Simulink model (ESRS_Update + LED logic)
 ├── matlab/
-│   ├── esrsParams.m         same constants as config.h
-│   ├── esrsInit.m / esrsStep.m   ESRS model (Simulink MATLAB Function-ready)
-│   ├── runScenarioTests.m   scenario testing + plots
-│   └── EyeMaxxerDashboard.m live UI (serial or simulated)
-├── simulink/                Simulink model notes
-├── tests/test_esrs.cpp      host-side unit tests for the firmware ESRS engine
-└── docs/                    hardware, wiring and algorithm docs
+│   ├── eye_strain_sim.m         original scenario testing script (5 scenarios)
+│   ├── graph.fig                original MATLAB figure from the make-a-thon
+│   ├── esrsParams.m / esrsStep.m    ESRS logic as reusable functions
+│   ├── runScenarioTests.m       automated regression check of the 5 scenarios
+│   └── EyeMaxxerDashboard.m     live GUI (Arduino serial, or simulated)
+├── firmware/EyeMaxxer/          Arduino sketch (Nano / Uno)
+│   ├── EyeMaxxer.ino            sensors, LEDs, serial telemetry
+│   ├── esrs.h                   C++ port of ESRS_Update
+│   └── config.h                 pin map + constants
+├── tests/test_esrs.cpp          checks the firmware against the MATLAB scenario timings
+└── docs/                        slides (PDF), hardware, wiring, algorithm
 ```
 
-The code here is a cleaned-up, documented version of the prototype. The C++
-firmware and the MATLAB model implement the same algorithm, and CI checks both.
+The Simulink model, `eye_strain_sim.m`, `graph.fig` and the slides are the original
+make-a-thon files. The Arduino firmware, the GUI script and the tests were
+rewritten and documented for this repository. They follow the original logic
+exactly, and CI checks that the C++ firmware reproduces the MATLAB scenario timings.
 
 ## Getting started
 
-### 1. Build the hardware
+### Hardware
 
-You'll need an Arduino Uno (or Nano), an HC-SR04, a DHT11, an analog sound sensor,
-4 LEDs and a few resistors. The parts list and wiring are in [`docs/hardware.md`](docs/hardware.md).
+Arduino Nano (or Uno), HC-SR04, DHT11, a microphone sound-sensor module, three LEDs
+(green, amber, red) and 220 Ω resistors. → [`docs/hardware.md`](docs/hardware.md)
 
 | Part | Pin | | Part | Pin |
 |---|---|---|---|---|
-| HC-SR04 TRIG / ECHO | D9 / D10 | | Green / Yellow / Red LED | D3 / D5 / D6 |
-| DHT11 data | D2 | | Proximity LED | D7 |
-| Sound sensor AO | A0 | | | |
+| HC-SR04 TRIG / ECHO | D9 / D10 | | Green LED | D3 |
+| DHT11 data | D2 | | Amber LED | D5 |
+| Microphone AO | A0 | | Red LED | D6 |
 
-### 2. Flash the firmware
+### Flash the firmware
 
 1. Open `firmware/EyeMaxxer/EyeMaxxer.ino` in the Arduino IDE.
 2. In the Library Manager, install **DHT sensor library** (Adafruit) and **Adafruit Unified Sensor**.
-3. Select **Arduino Uno** (or **Nano**) and upload.
-4. On power-up the LEDs sweep once as a self-test. Open the Serial Monitor at **115200 baud** to see the telemetry.
+3. Select **Arduino Nano** (or **Uno**) and upload. On power-up the three LEDs light in turn as a self-test.
 
 Or from the command line:
 
@@ -150,52 +169,42 @@ arduino-cli lib install "DHT sensor library" "Adafruit Unified Sensor"
 ```
 
 ```bash
-arduino-cli compile --fqbn arduino:avr:uno firmware/EyeMaxxer
+arduino-cli compile --upload -p COM4 --fqbn arduino:avr:nano firmware/EyeMaxxer
 ```
 
-```bash
-arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno firmware/EyeMaxxer
-```
-
-### 3. Run the MATLAB dashboard
+### Run the MATLAB side
 
 ```matlab
 cd matlab
-EyeMaxxerDashboard            % simulated study session, no hardware needed
-serialportlist("available")   % find your board
-EyeMaxxerDashboard("COM5")    % live data from the Arduino (e.g. "/dev/ttyACM0" on Linux/macOS)
+eye_strain_sim                % original scenario testing: 5 figures + LED timings
+EyeMaxxerDashboard            % live GUI: enter the port, press Connect (or Simulate)
+EyeMaxxerDashboard("COM4")    % ...or connect straight away
+runScenarioTests              % automated checks (also runs in GNU Octave)
 ```
 
-Requires MATLAB R2020a or newer. **Reset ESRS** sends `r` to the board.
-
-### 4. Run the tests
-
-```matlab
-cd matlab
-runScenarioTests              % MATLAB or GNU Octave
-```
+To test the firmware logic on a PC:
 
 ```bash
-g++ -std=c++11 -Wall -Wextra -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs && ./test_esrs
+g++ -std=c++11 -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs && ./test_esrs
 ```
 
-### Serial protocol
-
-The board prints a CSV line at 5 Hz, plus `#`-prefixed comment lines:
+<details>
+<summary>Serial protocol (9600 baud)</summary>
 
 ```
-D,t_ms,distance_cm,noise,humidity_pct,temp_c,multiplier,esrs,zone,level,prox
-D,183400,47.3,212,34.0,22.1,1.625,58.41,2,1,0
+D,t_ms,distance_cm,humidity_pct,noise,temp_c,rate_per_min,esrs,zone,green,amber,red
+D,183400,35.2,28.0,0.21,22.1,5.85,41.37,1,0,0,0
 ```
 
-`zone`: 0 away · 1 danger · 2 close · 3 ok. `level`: 0 green · 1 yellow · 2 red · 3 red-blink.
-Commands: `r` resets the score, `?` reprints the header.
+`zone`: 0 = < 30 cm · 1 = 30–40 · 2 = 40–60 · 3 = 60–100 · 4 = > 100 (recovery).
+Send `r` to reset the score, `?` to reprint the header.
+</details>
 
 ## Team
 
 Built by a team of first-year students:
 
-- [KooCeL](https://github.com/KooCeL) (repository author)
+- **Maxell Fanson Suharsono** ([@KooCeL](https://github.com/KooCeL))
 - [Martin Stoynev](https://www.linkedin.com/in/martinstoynev/)
 - [Alim Aswani](https://www.linkedin.com/in/alim-aswani-843aa527b/)
 - [Jeremy Kek](https://www.linkedin.com/in/jeremykek/)
@@ -211,11 +220,11 @@ MechSoc president [Sanan Shankar](https://www.linkedin.com/in/sanan-shankar/) an
 
 ## What's next
 
-- 👀 **Eye-tracking integration** (e.g. webcam-based blink rate and gaze detection) to make
-  EyeMaxxer smarter and more personalised.
-- 🎛️ Per-user calibration of thresholds and multipliers.
-- 📱 A wireless (BLE) version with a phone companion app.
+- 👀 **Eye-tracking integration** to make EyeMaxxer smarter and more personalised.
+- 🔗 Fully integrate the UI with the product, plus a personal **EyeScore**.
+- 📱 Support **other devices**: tablets and books.
+- 🏢 Expand to **other markets**: office work, gaming, and cycling (blind-spot and distance warnings).
 
 ---
 
-<sub>The ESRS thresholds were tuned for a working prototype under hackathon time pressure. They are not clinically validated. If you have persistent eye discomfort, see an optometrist.</sub>
+<sub>The ESRS rates and thresholds were chosen for a working prototype under make-a-thon time pressure. They are not clinically validated. If you have persistent eye discomfort, see an optometrist.</sub>

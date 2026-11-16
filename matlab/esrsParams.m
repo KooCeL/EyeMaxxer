@@ -1,34 +1,31 @@
 function p = esrsParams()
-%ESRSPARAMS  Eye Strain Risk Score (ESRS) tuning constants.
-%   p = esrsParams() returns a struct with the same constants as
-%   firmware/EyeMaxxer/config.h. Keep the two files in sync so the MATLAB
-%   scenario tests describe exactly what the hardware does.
+%ESRSPARAMS  Eye Strain Risk Score (ESRS) constants.
+%   p = esrsParams() returns the constants used by the team's scenario
+%   script (eye_strain_sim.m) and the ESRS_Update block of the Simulink model
+%   (../simulink/simulink_eyestrain.slx). The firmware uses the same values
+%   in ../firmware/EyeMaxxer/config.h - keep all three in sync.
 
-    % Distance zones (cm)
-    p.dangerCm       = 30;    % closer than this = immediate danger zone
-    p.closeCm        = 50;    % 30-50 cm = too close
-    p.awayCm         = 120;   % further than this (or no echo) = user away
-    p.awayDebounceS  = 2;     % away this long before recovery starts
+    % Distance zone boundaries (cm)
+    p.dangerCm   = 30;    % d <  30          immediate danger (amber LED)
+    p.fastCm     = 40;    % 30 <= d <  40    fast strain
+    p.moderateCm = 60;    % 40 <= d <  60    moderate strain
+    p.mildCm     = 100;   % 60 <= d <= 100   mild strain;  d > 100 recovery
 
-    % Base increments (score points per second) and recovery
-    p.rateOk         = 0.05;
-    p.rateClose      = 0.12;
-    p.rateDanger     = 0.40;
-    p.rateRecovery   = 3.50;   % a 20 s break after 20 min (20-20-20 rule) ~resets the score
+    % ESRS change rates (points per minute)
+    p.rate_under30 = 15.0;
+    p.rate_30_40   = 4.5;
+    p.rate_40_60   = 2.0;
+    p.rate_60_100  = 0.1;
+    p.rate_over100 = -6.0;
 
-    % Environmental multipliers
-    p.noiseThreshold = 200;   % smoothed mic peak-to-peak (ADC counts)
-    p.noiseMult      = 1.25;
-    p.humidityLowPct = 40;
-    p.humidityMult   = 1.30;
+    % Environmental multipliers (applied only when closer than 60 cm)
+    p.dryHumidityThreshold = 40;    % humidity below this is dry
+    p.highNoiseThreshold   = 0.6;   % normalised noise at/above this is noisy
+    p.dryMultiplier        = 1.30;
+    p.noiseMultiplier      = 1.20;
 
-    % LED thresholds
-    p.esrsMax        = 100;
-    p.levelYellow    = 40;
-    p.levelRed       = 70;
-    p.levelOverdue   = 90;
-    p.hysteresis     = 3;
-
-    % Timing
-    p.tickS          = 0.1;   % firmware update period
+    % Limits and alert threshold
+    p.riskMin       = 0;
+    p.riskMax       = 100;
+    p.riskThreshold = 70;           % red LED
 end

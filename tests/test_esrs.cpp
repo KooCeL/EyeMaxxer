@@ -1,5 +1,11 @@
-// Host-side unit tests for the ESRS engine used in the firmware.
-// Build & run:  g++ -std=c++11 -Wall -Wextra -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs && ./test_esrs
+// Host-side unit tests for the firmware ESRS engine.
+//
+// The five scenarios are the ones from the team's MATLAB script
+// (matlab/eye_strain_sim.m). The firmware must reproduce the same LED timings
+// that the script printed and that are shown in the presentation.
+//
+// Build & run:
+//   g++ -std=c++11 -Wall -Wextra -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs && ./test_esrs
 #include <cmath>
 #include <cstdio>
 #include "esrs.h"
@@ -11,92 +17,105 @@ static int failures = 0;
     else         { std::printf("  ok:   %s\n", msg); }               \
   } while (0)
 
-static const float DT = TICK_MS / 1000.0f;
-static const EsrsInputs QUIET_HUMID = {60.0f, 50.0f, 55.0f};
+struct Segment { float untilMin, distance, humidity, noise; };
 
-// Run the engine for `seconds` with fixed inputs; returns the last output.
-static EsrsOutputs run(EsrsEngine& e, EsrsInputs in, float seconds) {
-  EsrsOutputs o = e.update(in, 0.0f);
-  int ticks = (int)std::lround(seconds / DT);
-  for (int i = 0; i < ticks; i++) o = e.update(in, DT);
-  return o;
+struct Result {
+  float firstAmberMin = -1, firstRedMin = -1, redOffMin = -1;
+  float finalScore = 0, maxScore = 0;
+};
+
+// Same sampling as eye_strain_sim.m: t = 0:dt:duration, dt = 1 s, the score
+// is updated at every sample (including t = 0).
+static Result simulate(const Segment* segs, int nSegs, float durationMin) {
+  EsrsEngine e;
+  Result r;
+  bool wasRed = false;
+  int n = (int)std::lround(durationMin * 60.0f);
+  for (int k = 0; k <= n; k++) {
+    float tmin = k / 60.0f;
+    int s = 0;
+    while (s < nSegs - 1 && tmin >= segs[s].untilMin) s++;
+    EsrsOutputs o = e.update({segs[s].distance, segs[s].humidity, segs[s].noise}, 1.0f);
+    if (o.amberAlert && r.firstAmberMin < 0) r.firstAmberMin = tmin;
+    if (o.redAlert && r.firstRedMin < 0) r.firstRedMin = tmin;
+    if (wasRed && !o.redAlert && r.redOffMin < 0) r.redOffMin = tmin;
+    wasRed = o.redAlert;
+    if (o.score > r.maxScore) r.maxScore = o.score;
+    r.finalScore = o.score;
+  }
+  return r;
 }
 
-static bool near(float a, float b, float tol = 0.05f) { return std::fabs(a - b) <= tol; }
+static bool near2dp(float a, float b) { return std::fabs(a - b) < 0.006f; }
 
 int main() {
-  std::puts("Zone classification");
-  CHECK(EsrsEngine::classify(0.0f) == ZONE_AWAY, "no echo -> away");
-  CHECK(EsrsEngine::classify(25.0f) == ZONE_DANGER, "25 cm -> danger");
-  CHECK(EsrsEngine::classify(40.0f) == ZONE_CLOSE, "40 cm -> close");
-  CHECK(EsrsEngine::classify(65.0f) == ZONE_OK, "65 cm -> ok");
-  CHECK(EsrsEngine::classify(150.0f) == ZONE_AWAY, "150 cm -> away");
+  std::puts("Zones");
+  CHECK(EsrsEngine::classify(25) == ZONE_DANGER, "25 cm -> immediate danger");
+  CHECK(EsrsEngine::classify(35) == ZONE_FAST, "35 cm -> fast strain");
+  CHECK(EsrsEngine::classify(50) == ZONE_MODERATE, "50 cm -> moderate strain");
+  CHECK(EsrsEngine::classify(100) == ZONE_MILD, "100 cm -> mild strain (inclusive)");
+  CHECK(EsrsEngine::classify(120) == ZONE_RECOVERY, "120 cm -> recovery");
+  CHECK(EsrsEngine::classify(0) == ZONE_RECOVERY, "no echo -> recovery");
 
-  std::puts("Healthy posture reaches red in ~23 min");
+  std::puts("Multipliers only apply closer than 60 cm");
   {
     EsrsEngine e;
-    EsrsOutputs o = run(e, QUIET_HUMID, 20 * 60);
-    CHECK(near(o.score, 60.0f), "20 min at 60 cm -> ESRS 60");
-    CHECK(o.level == LEVEL_RISING, "...yellow LED");
-    o = run(e, QUIET_HUMID, 4 * 60);
-    CHECK(o.level == LEVEL_HIGH, "24 min -> red LED");
-    CHECK(!o.proximityWarning, "no proximity warning at 60 cm");
+    EsrsOutputs o = e.update({35, 28, 0.8f}, 1.0f);
+    CHECK(std::fabs(o.ratePerMin - 4.5f * 1.3f * 1.2f) < 1e-4f, "35 cm, dry + noisy -> 4.5 x 1.3 x 1.2");
+    o = e.update({75, 28, 0.8f}, 1.0f);
+    CHECK(std::fabs(o.ratePerMin - 0.1f) < 1e-6f, "75 cm, dry + noisy -> 0.1 (no multiplier)");
+    o = e.update({35, -1, 0.2f}, 1.0f);
+    CHECK(std::fabs(o.ratePerMin - 4.5f) < 1e-6f, "no humidity reading yet -> not dry");
   }
 
-  std::puts("Danger zone");
+  std::puts("Scenario 1 - immediate under 30 cm");
   {
-    EsrsEngine e;
-    EsrsOutputs o = run(e, {25.0f, 50.0f, 55.0f}, 60);
-    CHECK(o.proximityWarning, "proximity LED on immediately below 30 cm");
-    CHECK(near(o.score, 24.0f), "60 s at 25 cm -> ESRS 24");
+    Segment s[] = {{2, 70, 50, 0.2f}, {5, 25, 50, 0.2f}, {15, 75, 50, 0.2f}};
+    Result r = simulate(s, 3, 15);
+    CHECK(near2dp(r.firstAmberMin, 2.00f), "amber LED at 2.00 min");
+    CHECK(r.firstRedMin < 0, "red LED never on");
   }
 
-  std::puts("Environmental multipliers");
+  std::puts("Scenario 2 - 35 cm, dry");
   {
-    EsrsEngine e;
-    EsrsOutputs o = run(e, {60.0f, 400.0f, 30.0f}, 100);
-    CHECK(o.noisy && o.dry, "noisy and dry flags set");
-    CHECK(near(o.multiplier, 1.625f, 1e-4f), "multiplier = 1.25 * 1.30");
-    CHECK(near(o.score, 8.125f), "100 s noisy+dry at 60 cm -> ESRS 8.125");
-
-    EsrsEngine e2;
-    o = run(e2, {60.0f, 50.0f, -1.0f}, 100);
-    CHECK(!o.dry && near(o.score, 5.0f), "no humidity reading -> no dry multiplier");
+    Segment s[] = {{5, 70, 28, 0.2f}, {25, 35, 28, 0.2f}, {35, 75, 28, 0.2f}};
+    Result r = simulate(s, 3, 35);
+    CHECK(near2dp(r.firstRedMin, 16.87f), "red LED at 16.87 min");
+    CHECK(r.maxScore == ESRS_MAX, "ESRS saturates at 100");
   }
 
-  std::puts("Breaks: debounce and recovery");
+  std::puts("Scenario 3 - 35 cm, humid");
   {
-    EsrsEngine e;
-    run(e, {25.0f, 50.0f, 55.0f}, 200);  // ESRS 80
-    EsrsOutputs o = run(e, {0.0f, 50.0f, 55.0f}, 1.5f);
-    CHECK(near(o.score, 80.0f), "1.5 s glance away does not count as a break");
-    o = run(e, {0.0f, 50.0f, 55.0f}, 20.0f);
-    CHECK(near(o.score, 80.0f - RATE_RECOVERY * (21.5f - AWAY_DEBOUNCE_S),
-               RATE_RECOVERY * DT + 0.01f),  // +-1 tick at the debounce edge
-          "20 s break drains ~68 points");
-    CHECK(o.level == LEVEL_LOW, "...and the LEDs return to green");
-    o = run(e, {0.0f, 50.0f, 55.0f}, 120.0f);
-    CHECK(o.score == 0.0f, "score clamps at 0");
+    Segment s[] = {{5, 70, 55, 0.2f}, {25, 35, 55, 0.2f}, {35, 75, 55, 0.2f}};
+    Result r = simulate(s, 3, 35);
+    CHECK(near2dp(r.firstRedMin, 20.43f), "red LED at 20.43 min (later than dry)");
   }
 
-  std::puts("Clamp and overdue level");
+  std::puts("Scenario 4 - 50 cm, humid, noisy after 20 min");
   {
-    EsrsEngine e;
-    EsrsOutputs o = run(e, {20.0f, 400.0f, 20.0f}, 600);
-    CHECK(o.score == ESRS_MAX, "score clamps at 100");
-    CHECK(o.level == LEVEL_BREAK_OVERDUE, "red LED blinks when overdue");
+    Segment s[] = {{5, 75, 55, 0.2f}, {20, 50, 55, 0.2f}, {55, 50, 55, 0.8f}, {60, 75, 55, 0.8f}};
+    Result r = simulate(s, 4, 60);
+    CHECK(near2dp(r.firstRedMin, 36.45f), "red LED at 36.45 min");
   }
 
-  std::puts("LED hysteresis");
+  std::puts("Scenario 5 - recovery above 100 cm");
+  {
+    Segment s[] = {{12, 35, 30, 0.2f}, {20, 45, 30, 0.2f}, {22, 45, 50, 0.2f},
+                   {35, 120, 50, 0.2f}, {50, 70, 50, 0.2f}};
+    Result r = simulate(s, 5, 50);
+    CHECK(near2dp(r.firstRedMin, 11.95f), "red LED at 11.95 min");
+    CHECK(r.redOffMin > 22.0f && r.redOffMin < 35.0f, "red LED clears during the break");
+    CHECK(r.finalScore < 30.0f, "ESRS recovered to below 30");
+  }
+
+  std::puts("Green LED");
   {
     EsrsEngine e;
-    run(e, {25.0f, 50.0f, 55.0f}, 180);  // ESRS 72 -> red
-    EsrsInputs away = {0.0f, 50.0f, 55.0f};
-    EsrsOutputs o = run(e, away, AWAY_DEBOUNCE_S + 3.0f / RATE_RECOVERY);  // ~69
-    CHECK(o.score < LEVEL_RED && o.level == LEVEL_HIGH, "just below 70 -> still red");
-    o = run(e, away, 3.0f / RATE_RECOVERY);  // ~67 - well below 70 - hysteresis
-    CHECK(o.score < LEVEL_RED - LEVEL_HYSTERESIS && o.level == LEVEL_RISING,
-          "below 67 -> drops to yellow");
+    CHECK(e.update({120, 50, 0.2f}, 1.0f).greenLed, "green on while ESRS == 0");
+    CHECK(!e.update({50, 50, 0.2f}, 1.0f).greenLed, "green off once strain accumulates");
+    EsrsOutputs o;
+    for (int i = 0; i < 60; i++) o = e.update({150, 50, 0.2f}, 1.0f);
+    CHECK(o.greenLed && o.score == 0.0f, "green back on after recovering to 0");
   }
 
   std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "ALL TESTS PASSED",
