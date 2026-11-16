@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  firmware:
+    name: Compile firmware (${{ matrix.fqbn }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fqbn: [arduino:avr:uno, arduino:avr:nano]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: ${{ matrix.fqbn }}
+          sketch-paths: |
+            - firmware/EyeMaxxer
+          libraries: |
+            - name: DHT sensor library
+            - name: Adafruit Unified Sensor
+
+  esrs-unit-tests:
+    name: ESRS unit tests (C++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run
+        run: |
+          g++ -std=c++11 -Wall -Wextra -Werror -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs
+          ./test_esrs
+
+  scenario-tests:
+    name: ESRS scenario tests (Octave)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GNU Octave
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends octave-cli
+      - name: Run scenarios
+        working-directory: matlab
+        run: octave-cli --no-gui --eval "runScenarioTests(false);"
