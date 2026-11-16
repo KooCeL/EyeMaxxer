@@ -1,14 +1,11 @@
 // =============================================================================
-//  EyeMaxxer - configuration
-//  Pin map, sensor settings and Eye Strain Risk Score (ESRS) constants.
+//  EyeMaxxer - configuration (live hardware version)
 //
-//  Target board: Arduino Nano (as used at the make-a-thon) or Arduino Uno -
-//  both are ATmega328P boards with the same pin names.
+//  Pin map, sensor settings and the live Eye Strain Risk Score (ESRS) rules.
+//  These match the "THE EyeMaxxer" MATLAB GUI used in the make-a-thon demo:
+//  a 0-1000 ESRS gauge and per-tick zone increments (+4 / +2 / +1 / -3).
 //
-//  The ESRS constants are identical to the team's MATLAB scenario script
-//  (matlab/eye_strain_sim.m) and the ESRS_Update MATLAB Function block in the
-//  Simulink model (simulink/simulink_eyestrain.slx). Keep them in sync with
-//  matlab/esrsParams.m.
+//  Target board: Arduino Nano (used at the make-a-thon) or Arduino Uno.
 // =============================================================================
 #pragma once
 
@@ -17,61 +14,67 @@
 // ----------------------------------------------------------------------------
 #define PIN_US_TRIG      9    // HC-SR04 TRIG
 #define PIN_US_ECHO      10   // HC-SR04 ECHO
-#define PIN_DHT          2    // DHT11 data line
-#define PIN_MIC          A0   // Microphone module analog out (AO)
+#define PIN_DHT          2    // DHT11 data (optional - see USE_DHT)
+#define PIN_MIC          A0   // microphone module analog out (optional - see USE_MIC)
 
-#define PIN_LED_GREEN    3    // ON while ESRS == 0 (fully rested)
-#define PIN_LED_AMBER    5    // BLINKS while distance < 30 cm (immediate alert)
-#define PIN_LED_RED      6    // BLINKS while ESRS >= 70 (accumulated strain alert)
+#define PIN_LED_GREEN    3    // ESRS < LEVEL_AMBER        (safe)
+#define PIN_LED_AMBER    5    // LEVEL_AMBER <= ESRS < LEVEL_RED (warning)
+#define PIN_LED_RED      6    // ESRS >= LEVEL_RED, or blinking when < 30 cm
+#define PIN_VIBRATION    8    // vibration motor via NPN transistor (optional)
+
+// Optional sensors: set to 0 if the part isn't fitted. Without them the
+// readings are reported as 0 / quiet and no multiplier is applied.
+#define USE_DHT          1
+#define USE_MIC          1
+#define DHT_TYPE         DHT11
+
+// ----------------------------------------------------------------------------
+//  Timing
+// ----------------------------------------------------------------------------
+#define SERIAL_BAUD      9600
+#define TICK_MS          1000    // one ESRS "tick" per second
+#define SAMPLE_MS        100     // distance / noise sampling period
+#define BLINK_MS         250     // half-period of the danger-zone blink
+#define VIBRATE_ON_MS    300     // vibration pulse length within each tick
 
 // ----------------------------------------------------------------------------
 //  Sensors
 // ----------------------------------------------------------------------------
-#define DHT_TYPE         DHT11
-#define SERIAL_BAUD      9600
+#define US_TIMEOUT_US    25000UL // ~4 m max range
+#define NO_ECHO_CM       400.0f  // reported when nothing echoes back (user away)
+#define US_MEDIAN_N      5       // rolling median window
 
-#define US_TIMEOUT_US    25000UL // ~4 m max range; no echo => treated as "away"
-#define US_MEDIAN_N      5       // rolling median window for distance samples
-#define NO_ECHO_CM       400.0f  // distance reported when there is no echo
-
-#define MIC_WINDOW_MS    20      // peak-to-peak sampling window per tick
-#define MIC_FULL_SCALE   512.0f  // peak-to-peak (ADC counts) that maps to noise = 1.0
-#define NOISE_EMA_ALPHA  0.15f   // smoothing for the noise level (0..1)
+#define MIC_WINDOW_MS    20      // peak-to-peak window per sample
+#define MIC_LOUD_P2P     300     // peak-to-peak (ADC counts) treated as "loud"
+#define DRY_HUMIDITY_PCT 40      // below this the air is "dry"
 
 // ----------------------------------------------------------------------------
-//  Scheduler (ms)
+//  ESRS - proximity zones (cm) and increments (points per tick)
 // ----------------------------------------------------------------------------
-#define TICK_MS          100     // sensing + ESRS update period
-#define DHT_PERIOD_MS    2000    // DHT11 cannot be read faster than ~1 Hz
-#define REPORT_PERIOD_MS 250     // serial telemetry for the MATLAB GUI
-#define BLINK_PERIOD_MS  500     // amber / red LED blink period
+#define ZONE_DANGER_CM   30.0f   // <  30 cm   Immediate Danger (+blink)
+#define ZONE_FAST_CM     40.0f   // 30-40 cm   Fast Strain
+#define ZONE_MODERATE_CM 60.0f   // 40-60 cm   Moderate Strain
+#define ZONE_MILD_CM     100.0f  // 60-100 cm  Mild Strain;  >= 100 cm Recovery
 
-// ----------------------------------------------------------------------------
-//  ESRS - distance zones (cm) and rates (ESRS points per MINUTE)
-// ----------------------------------------------------------------------------
-#define ZONE_DANGER_CM   30.0f   // d <  30         immediate danger
-#define ZONE_FAST_CM     40.0f   // 30 <= d <  40   fast strain
-#define ZONE_MODERATE_CM 60.0f   // 40 <= d <  60   moderate strain
-#define ZONE_MILD_CM     100.0f  // 60 <= d <= 100  mild strain;  d > 100 recovery
+#define INC_DANGER       6.0f
+#define INC_FAST         4.0f
+#define INC_MODERATE     2.0f
+#define INC_MILD         1.0f
+#define INC_RECOVERY    -3.0f
 
-#define RATE_UNDER_30    15.0f
-#define RATE_30_40       4.5f
-#define RATE_40_60       2.0f
-#define RATE_60_100      0.1f
-#define RATE_OVER_100   -6.0f    // negative = eyes recover while you are away
-
-// ----------------------------------------------------------------------------
-//  ESRS - environmental multipliers (only applied when closer than 60 cm)
-// ----------------------------------------------------------------------------
-#define DRY_HUMIDITY_PCT 40.0f   // humidity below this is "dry"
+// Environmental multipliers - only applied closer than ZONE_MODERATE_CM
 #define DRY_MULT         1.30f
-#define HIGH_NOISE_LEVEL 0.6f    // normalised noise (0..1) at/above this is "noisy"
-#define NOISE_MULT       1.20f
-#define MULT_MAX_CM      60.0f
+#define LOUD_MULT        1.20f
 
 // ----------------------------------------------------------------------------
-//  ESRS - limits and alert threshold
+//  ESRS - scale and LED levels
 // ----------------------------------------------------------------------------
-#define ESRS_MIN         0.0f
-#define ESRS_MAX         100.0f
-#define ESRS_RED         70.0f   // red LED threshold
+#define ESRS_MAX         1000.0f
+#define LEVEL_AMBER      300.0f
+#define LEVEL_RED        700.0f
+
+// ----------------------------------------------------------------------------
+//  Alert mode at power-up (change at runtime by sending 'm' over serial)
+//    0 = LEDs + vibrate,  1 = LEDs only,  2 = vibrate only
+// ----------------------------------------------------------------------------
+#define DEFAULT_ALERT_MODE 0

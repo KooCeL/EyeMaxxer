@@ -21,8 +21,8 @@
 
 ---
 
-> 📅 Built over one weekend in Cambridge, **about 7 months before this repository
-> was curated (November 2026)**, by a team made up entirely of first-year students.
+> 📅 **March 2026.** Built over one weekend in Cambridge, about 8 months before this
+> repository was curated (November 2026), by a team made up entirely of first-year students.
 
 ## The problem
 
@@ -41,14 +41,12 @@ EyeMaxxer clips onto the top of a laptop and keeps an eye on *how* you use your 
 | ![CAD design of the clip-on housing](docs/images/cad-design.jpg) | ![The prototype components](docs/images/components.jpg) |
 
 - 📏 **A laptop-mounted ultrasonic sensor** measures your distance from the screen continuously.
-- 🧮 **The Eye Strain Risk Score (ESRS)** goes up at a rate set by how close you sit,
-  and comes back down when you step away (> 100 cm).
-- 🌫️ **It's context-aware:** **low humidity** (× 1.30) and **ambient noise** (× 1.20) speed
-  up strain build-up whenever you sit closer than 60 cm.
-- 🚦 **Three LEDs** warn on two time scales:
-  - 🟠 **amber blinks immediately** if you sit closer than **30 cm**,
-  - 🔴 **red blinks** once the accumulated ESRS reaches **70**,
-  - 🟢 **green stays on** while you're fully rested (ESRS = 0).
+- 🧮 **The Eye Strain Risk Score (ESRS)** goes up at a rate set by your proximity zone,
+  and comes back down when you step away (≥ 100 cm).
+- 🌫️ **It's context-aware:** **low humidity** (× 1.30) and **ambient noise** (× 1.20)
+  speed up strain build-up whenever you sit closer than 60 cm.
+- 🚦 **Green / amber / red LEDs** show both the *immediate* danger (sitting closer than
+  **30 cm**) and the strain *accumulated over time*. A vibration motor can buzz as well.
 - 📊 **A live MATLAB GUI** shows the real-time ESRS, screen distance and LED status.
 - 🔋 **It works fully offline** on a battery pack, so it's portable for everyday use.
 
@@ -57,14 +55,19 @@ flowchart LR
     US["📏 HC-SR04<br/>screen distance"] --> MCU
     MIC["🎤 Microphone<br/>ambient noise"] --> MCU
     DHT["💧 DHT11<br/>humidity"] --> MCU
-    MCU["Arduino Nano<br/><b>ESRS logic</b>"] --> G["🟢 Green<br/>ESRS = 0"]
-    MCU --> A["🟠 Amber<br/>&lt; 30 cm"]
-    MCU --> R["🔴 Red<br/>ESRS ≥ 70"]
-    MCU -- "USB serial" --> UI["💻 MATLAB live GUI"]
+    MCU["Arduino Nano<br/><b>ESRS logic</b>"] --> LED["🚦 Green / Amber / Red LEDs"]
+    MCU --> VIB["📳 Vibration motor"]
+    MCU -- "USB serial, 1 line/s" --> UI["💻 MATLAB live GUI"]
     BAT["🔋 Battery pack"] -.-> MCU
 ```
 
 ## The Eye Strain Risk Score
+
+The ESRS exists in two versions. Both use the same structure: a proximity-zone rate,
+dry/noisy multipliers below 60 cm, and clamping.
+
+**1. The design model** (Simulink + MATLAB scenario testing) uses realistic time scales:
+**0–100**, with rates in points per minute.
 
 ```matlab
 deltaPerMin = rate(distance zone);
@@ -75,16 +78,25 @@ end
 ESRS = clamp(ESRS + deltaPerMin * dt/60, 0, 100);
 ```
 
-| Distance | Zone | ESRS / min |
-|---|---|---:|
-| < 30 cm | 🔴 Immediate danger (amber LED blinks) | +15.0 |
-| 30–40 cm | 🟠 Fast strain | +4.5 |
-| 40–60 cm | 🟡 Moderate strain | +2.0 |
-| 60–100 cm | 🟢 Mild strain | +0.1 |
-| > 100 cm | 🔵 Recovery | −6.0 |
+**2. The live hardware demo** (Arduino + GUI) uses a faster **0–1000** scale that changes
+every 1-second tick, so you can see it react within a minute or two.
 
-For example, at 35 cm the red LED comes on after **20.4 min** in a humid room but after
-**16.9 min** in a dry one. → Full details and all five scenarios are in
+| Distance | Zone | Model (ESRS/min, 0–100) | Live demo (per tick, 0–1000) |
+|---|---|---:|---:|
+| < 30 cm | 🔴 Immediate danger | +15.0 | +6 and blink |
+| 30–40 cm | 🟠 Fast strain | +4.5 | +4 |
+| 40–60 cm | 🟡 Moderate strain | +2.0 | +2 |
+| 60–100 cm | 🟢 Mild strain | +0.1 | +1 |
+| > 100 cm | 🔵 Recovery | −6.0 | −3 |
+
+| LEDs | Design model (Simulink) | Live demo (Arduino) |
+|---|---|---|
+| 🟢 Green | ESRS = 0 (fully rested) | ESRS < 300 (safe) |
+| 🟠 Amber | blinks when < 30 cm | 300 ≤ ESRS < 700 (warning) |
+| 🔴 Red | blinks when ESRS ≥ 70 | ESRS ≥ 700 (take a break) · **blinks immediately when < 30 cm** |
+
+In the model at 35 cm, the red alert comes on after **20.4 min** in a humid room but
+after **16.9 min** in a dry one. → Full details and all five scenarios are in
 [`docs/esrs-algorithm.md`](docs/esrs-algorithm.md).
 
 ## MATLAB integration 🏆
@@ -103,14 +115,21 @@ loop, plus Compare blocks for the three LEDs, targeting the Arduino Nano.
 
 [`matlab/eye_strain_sim.m`](matlab/eye_strain_sim.m) runs five scenarios to check
 the behaviour before trusting the hardware: the danger zone, fast build-up in dry
-vs humid air, a noisy environment, and recovery during a break.
+vs humid air, a noisy environment, and recovery during a break. Each scenario
+produces a polygraph-style figure of stacked strip charts: distance, humidity,
+noise, ESRS and the LED on/off signals over time.
+[`matlab/graph.fig`](matlab/graph.fig) is the saved figure for **Scenario 5 (recovery above 100 cm)**:
 
-![Scenario 2 - fast accumulation at 35 cm in dry air](docs/images/scenario2-dry.jpg)
+![Scenario 5 - recovery above 100 cm (graph.fig)](docs/images/scenario5-recovery.jpg)
 
 ### 3️⃣ Live graphical UI
 
-A MATLAB GUI shows the real-time ESRS gauge, live distance and ESRS plots,
-sensor readings, proximity zones and LED status.
+[`matlab/EyeMaxxerGUI.m`](matlab/EyeMaxxerGUI.m), "THE EyeMaxxer", shows:
+- the connection controls
+- live sensor readings and the proximity-zone legend
+- a 0–1000 ESRS gauge
+- the green/amber/red LED and vibration-motor indicators
+- 60 s of live distance and ESRS history
 
 ![THE EyeMaxxer live MATLAB GUI](docs/images/matlab-gui.jpg)
 
@@ -126,41 +145,45 @@ EyeMaxxer/
 │   └── simulink_eyestrain.slx   original Simulink model (ESRS_Update + LED logic)
 ├── matlab/
 │   ├── eye_strain_sim.m         original scenario testing script (5 scenarios)
-│   ├── graph.fig                original MATLAB figure from the make-a-thon
-│   ├── esrsParams.m / esrsStep.m    ESRS logic as reusable functions
+│   ├── graph.fig                original figure: Scenario 5 strip charts
+│   ├── esrsParams.m / esrsStep.m    design-model ESRS as reusable functions
 │   ├── runScenarioTests.m       automated regression check of the 5 scenarios
-│   └── EyeMaxxerDashboard.m     live GUI (Arduino serial, or simulated)
-├── firmware/EyeMaxxer/          Arduino sketch (Nano / Uno)
-│   ├── EyeMaxxer.ino            sensors, LEDs, serial telemetry
-│   ├── esrs.h                   C++ port of ESRS_Update
-│   └── config.h                 pin map + constants
-├── tests/test_esrs.cpp          checks the firmware against the MATLAB scenario timings
+│   └── EyeMaxxerGUI.m           "THE EyeMaxxer" live GUI (rebuilt)
+├── firmware/EyeMaxxer/          Arduino sketch for the live device (rebuilt)
+│   ├── EyeMaxxer.ino            sensors, LEDs, vibration motor, serial output
+│   ├── esrs.h                   live ESRS engine (0–1000, per tick)
+│   └── config.h                 pins, zones, increments, thresholds
+├── tests/test_esrs.cpp          unit tests for the live ESRS engine
 └── docs/                        slides (PDF), hardware, wiring, algorithm
 ```
 
-The Simulink model, `eye_strain_sim.m`, `graph.fig` and the slides are the original
-make-a-thon files. The Arduino firmware, the GUI script and the tests were
-rewritten and documented for this repository. They follow the original logic
-exactly, and CI checks that the C++ firmware reproduces the MATLAB scenario timings.
+**What's original and what's rebuilt:** the Simulink model, `eye_strain_sim.m`,
+`graph.fig` and the slides are the original make-a-thon files. The original Arduino
+sketch and GUI source were lost, so `firmware/` and `EyeMaxxerGUI.m` were rebuilt
+from the GUI shown in the presentation. They use the same zones, increments,
+0–1000 scale, LEDs, vibration motor and panel layout.
 
 ## Getting started
 
 ### Hardware
 
-Arduino Nano (or Uno), HC-SR04, DHT11, a microphone sound-sensor module, three LEDs
-(green, amber, red) and 220 Ω resistors. → [`docs/hardware.md`](docs/hardware.md)
+Arduino Nano (or Uno), an HC-SR04 ultrasonic sensor, green/amber/red LEDs with 220 Ω
+resistors, and optionally a DHT11, a microphone module and a small vibration motor.
+→ [`docs/hardware.md`](docs/hardware.md)
 
 | Part | Pin | | Part | Pin |
 |---|---|---|---|---|
 | HC-SR04 TRIG / ECHO | D9 / D10 | | Green LED | D3 |
-| DHT11 data | D2 | | Amber LED | D5 |
-| Microphone AO | A0 | | Red LED | D6 |
+| DHT11 data *(optional)* | D2 | | Amber LED | D5 |
+| Microphone AO *(optional)* | A0 | | Red LED | D6 |
+| Vibration motor *(optional, via transistor)* | D8 | | | |
 
 ### Flash the firmware
 
 1. Open `firmware/EyeMaxxer/EyeMaxxer.ino` in the Arduino IDE.
 2. In the Library Manager, install **DHT sensor library** (Adafruit) and **Adafruit Unified Sensor**.
-3. Select **Arduino Nano** (or **Uno**) and upload. On power-up the three LEDs light in turn as a self-test.
+   No DHT11 fitted? Set `USE_DHT 0` in `config.h` and skip the libraries.
+3. Select **Arduino Nano** (or **Uno**) and upload. On power-up the LEDs light green → amber → red as a self-test.
 
 Or from the command line:
 
@@ -176,10 +199,11 @@ arduino-cli compile --upload -p COM4 --fqbn arduino:avr:nano firmware/EyeMaxxer
 
 ```matlab
 cd matlab
-eye_strain_sim                % original scenario testing: 5 figures + LED timings
-EyeMaxxerDashboard            % live GUI: enter the port, press Connect (or Simulate)
-EyeMaxxerDashboard("COM4")    % ...or connect straight away
-runScenarioTests              % automated checks (also runs in GNU Octave)
+EyeMaxxerGUI                  % live GUI: enter the port (e.g. COM4), press Connect
+EyeMaxxerGUI("COM4")          % ...or connect straight away
+EyeMaxxerGUI("demo")          % no hardware: scripted session through the same GUI
+eye_strain_sim                % original scenario testing (5 strip-chart figures)
+runScenarioTests              % automated model checks (also runs in GNU Octave)
 ```
 
 To test the firmware logic on a PC:
@@ -189,15 +213,26 @@ g++ -std=c++11 -I firmware/EyeMaxxer tests/test_esrs.cpp -o test_esrs && ./test_
 ```
 
 <details>
-<summary>Serial protocol (9600 baud)</summary>
+<summary>Serial protocol (9600 baud, one line per second)</summary>
 
 ```
-D,t_ms,distance_cm,humidity_pct,noise,temp_c,rate_per_min,esrs,zone,green,amber,red
-D,183400,35.2,28.0,0.21,22.1,5.85,41.37,1,0,0,0
+DIST:45.2,HUM:38,SOUND:0,ZONE:2,INC:2.6,ESRS:512.4,LED:1,BLINK:0,VIB:0,MODE:0
 ```
 
-`zone`: 0 = < 30 cm · 1 = 30–40 · 2 = 40–60 · 3 = 60–100 · 4 = > 100 (recovery).
-Send `r` to reset the score, `?` to reprint the header.
+| Key | Meaning |
+|---|---|
+| `DIST` | distance in cm (400 = no echo / away) |
+| `HUM` | humidity % (0 until the DHT11 responds) |
+| `SOUND` | 1 = loud, 0 = quiet |
+| `ZONE` | 0 < 30 cm · 1 30–40 · 2 40–60 · 3 60–100 · 4 ≥ 100 (recovery) |
+| `INC` | ESRS change this tick, after multipliers |
+| `ESRS` | score, 0–1000 |
+| `LED` | 0 green · 1 amber · 2 red |
+| `BLINK` | 1 = immediate danger (< 30 cm), red LED blinking |
+| `VIB` | 1 = vibration motor pulsing |
+| `MODE` | alert mode: 0 LED + vibrate · 1 LED only · 2 vibrate only |
+
+Commands: `r` resets the ESRS, `m` cycles the alert mode, `0`/`1`/`2` set it directly.
 </details>
 
 ## Team

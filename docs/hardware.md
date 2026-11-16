@@ -12,9 +12,10 @@ boards with the same pin names.
 |----:|------|---------|
 | 1 | Arduino Nano (or Uno) | Microcontroller: all sensor logic and the ESRS run on the board |
 | 1 | HC-SR04 ultrasonic sensor | Measures screen-to-user distance (laptop-mounted, facing the user) |
-| 1 | DHT11 temperature & humidity sensor | Dry-air multiplier, plus speed-of-sound compensation |
-| 1 | Microphone sound-sensor module (analog out) | Noise multiplier |
-| 3 | 5 mm LEDs: green, amber (yellow), red | Rested / immediate alert / strain alert |
+| 1 | DHT11 temperature & humidity sensor *(optional)* | Dry-air multiplier |
+| 1 | Microphone sound-sensor module, analog out *(optional)* | Loud-room multiplier |
+| 3 | 5 mm LEDs: green, amber (yellow), red | Safe / warning / take a break (red blinks when < 30 cm) |
+| 1 | Small 3–5 V vibration motor + NPN transistor (e.g. 2N2222), 1 kΩ base resistor, 1N4148 flyback diode *(optional)* | Haptic alert |
 | 3 | 220 Ω resistors | LED current limiting |
 | 1 | USB power bank | Fully offline, portable operation |
 | 1 | 3D-printed clip-on housing | Holds the ultrasonic sensor on top of the laptop lid ([CAD render](images/cad-design.jpg)) |
@@ -38,6 +39,7 @@ boards with the same pin names.
 | Amber LED | anode → 220 Ω | D5 |
 | Red LED | anode → 220 Ω | D6 |
 | All LEDs | cathode | GND |
+| Vibration motor | via NPN transistor (base ← 1 kΩ ← pin) | D8 |
 
 ```
                   ┌───────────────────────┐
@@ -47,7 +49,8 @@ boards with the same pin names.
      Mic AO ──────┤ A0    Arduino Nano    │
   Green LED ◄─────┤ D3 ─[220Ω]            │
   Amber LED ◄─────┤ D5 ─[220Ω]            │
-  Red   LED ◄─────┤ D6 ─[220Ω]        USB ├─── laptop (MATLAB GUI) or power bank
+  Red   LED ◄─────┤ D6 ─[220Ω]            │
+  Vib. motor ◄────┤ D8 ─[1kΩ]─ NPN    USB ├─── laptop (MATLAB GUI) or power bank
                   └───────────────────────┘
 ```
 
@@ -55,12 +58,13 @@ boards with the same pin names.
 
 - **Ultrasonic:** mount it on the top edge of the lid, angled slightly down at
   the user's face and chest. A 5-sample rolling median rejects one-off echoes.
-  If there is no echo (nobody there), the reading counts as > 100 cm, which is
-  the recovery zone.
-- **Microphone:** the noise level is the microphone's peak-to-peak amplitude,
-  scaled to 0–1 by `MIC_FULL_SCALE`. "Noisy" means ≥ 0.6, the same as the
-  MATLAB model. Watch the `noise` column in the Serial Monitor (9600 baud) and
-  adjust `MIC_FULL_SCALE` or the module's trim pot until a quiet room reads
-  about 0.2 and a loud one about 0.8.
-- **DHT11:** polled every 2 s. Until the first valid reading arrives, the air is
-  not treated as dry.
+  If there is no echo (nobody there), the reading is 400 cm, which is the recovery zone.
+- **Microphone:** "loud" means the loudest 20 ms window in a tick has a
+  peak-to-peak amplitude of at least `MIC_LOUD_P2P` ADC counts (300 by default).
+  Open the Serial Monitor at 9600 baud and adjust `MIC_LOUD_P2P` or the module's
+  trim pot until talking nearby gives `SOUND:1` and a quiet room gives `SOUND:0`.
+- **DHT11:** read once per tick. It reports `HUM:0` until the first valid reading,
+  and 0 never counts as dry.
+- **Optional parts:** set `USE_DHT 0` or `USE_MIC 0` in `config.h` if a sensor
+  isn't fitted. With only the ultrasonic sensor and the LEDs, everything still
+  works; there just aren't any multipliers.

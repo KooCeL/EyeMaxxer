@@ -19,8 +19,9 @@ control logic before it went onto the Arduino Nano.
 | `ESRS`, `RedLED`, `AmberLED`, `GreenLED` | Display | Outputs |
 
 The `ESRS_Update` code is reproduced in [`matlab/esrsStep.m`](../matlab/esrsStep.m)
-(with `dt` and the constants passed in) and ported to C++ in
-[`firmware/EyeMaxxer/esrs.h`](../firmware/EyeMaxxer/esrs.h). Details are in
+(with `dt` and the constants passed in). The live Arduino version in
+[`firmware/EyeMaxxer/esrs.h`](../firmware/EyeMaxxer/esrs.h) keeps the same
+structure on a faster 0–1000 per-tick scale. Details are in
 [`docs/esrs-algorithm.md`](../docs/esrs-algorithm.md).
 
 ## Running it

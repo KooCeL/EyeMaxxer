@@ -1,22 +1,27 @@
 # Eye Strain Risk Score (ESRS)
 
-The ESRS is a score from **0 (rested)** to **100 (maximum strain)**. It
-accumulates while you sit at the screen and drains when you step away.
+The ESRS accumulates while you sit at the screen and drains when you step away.
+It exists in two versions with the same structure:
 
-The logic was first written as the `ESRS_Update` MATLAB Function block in the
+- the **design model** (0–100, rates per minute), built in Simulink and tested
+  with MATLAB scenarios, described first below, and
+- the **live hardware version** (0–1000, increments per 1 s tick), which runs on
+  the Arduino and drives the GUI. It is faster so it reacts visibly in a live
+  demo. See [Live hardware version](#live-hardware-version).
+
+The design model was first written as the `ESRS_Update` MATLAB Function block in the
 [Simulink model](../simulink/simulink_eyestrain.slx), then validated with the
-[scenario script](../matlab/eye_strain_sim.m). The same rules run in three places:
+[scenario script](../matlab/eye_strain_sim.m):
 
 | Implementation | Role |
 |---|---|
 | [`simulink/simulink_eyestrain.slx`](../simulink/simulink_eyestrain.slx) → `ESRS_Update` | Original embedded logic (Simulink, MATLAB Function block + Unit Delay) |
 | [`matlab/eye_strain_sim.m`](../matlab/eye_strain_sim.m) | Original scenario testing (5 scenarios, plots) |
-| [`matlab/esrsStep.m`](../matlab/esrsStep.m) | Reusable version used by the GUI simulation and the automated checks |
-| [`firmware/EyeMaxxer/esrs.h`](../firmware/EyeMaxxer/esrs.h) | C++ port running on the Arduino |
+| [`matlab/esrsStep.m`](../matlab/esrsStep.m) + [`runScenarioTests.m`](../matlab/runScenarioTests.m) | Reusable version and automated regression checks |
 
 ## Update rule
 
-Every time step `dt` (1 s in the model, 0.1 s on the Arduino):
+Every time step `dt` (1 s in the model):
 
 ```matlab
 deltaPerMin = rate(distance zone)
@@ -52,8 +57,10 @@ These match the Compare blocks in the Simulink model:
 ## Scenario results
 
 From [`eye_strain_sim.m`](../matlab/eye_strain_sim.m). The same timings are
-checked automatically by `matlab/runScenarioTests.m` (MATLAB model) and
-`tests/test_esrs.cpp` (Arduino C++ port):
+checked automatically by `matlab/runScenarioTests.m`. Each run draws a
+polygraph-style figure of stacked strip charts (distance, humidity, noise,
+ESRS, LED on/off). [`matlab/graph.fig`](../matlab/graph.fig) is the saved
+Scenario 5 figure.
 
 | Scenario | Conditions | Result |
 |----------|-----------|--------|
@@ -68,6 +75,40 @@ checked automatically by `matlab/runScenarioTests.m` (MATLAB model) and
 | ![Scenario 1](images/scenario1-danger-zone.jpg) | ![Scenario 2](images/scenario2-dry.jpg) |
 | ![Scenario 3](images/scenario3-humid.jpg) | ![Scenario 4](images/scenario4-noisy.jpg) |
 | ![Scenario 5](images/scenario5-recovery.jpg) | |
+
+## Live hardware version
+
+What runs on the Arduino ([`esrs.h`](../firmware/EyeMaxxer/esrs.h)) and appears
+in the GUI ([`EyeMaxxerGUI.m`](../matlab/EyeMaxxerGUI.m)). It was rebuilt from the
+live GUI in the presentation, which shows the zone increments and the 0–1000 gauge.
+
+```
+every tick (1 s):
+    increment = zone increment
+    if closer than 60 cm:  x1.30 if dry (humidity < 40 %), x1.20 if loud
+    ESRS = clamp(ESRS + increment, 0, 1000)
+```
+
+| Distance | Zone | Increment / tick |
+|----------|------|-----------------:|
+| < 30 cm | Immediate Danger | +6, red LED blinks + vibration |
+| 30–40 cm | Fast Strain | +4 |
+| 40–60 cm | Moderate Strain | +2 |
+| 60–100 cm | Mild Strain | +1 |
+| ≥ 100 cm (or no echo) | Recovery | −3 |
+
+| ESRS | LED | GUI state |
+|------|-----|-----------|
+| 0–299 | 🟢 green | SAFE |
+| 300–699 | 🟠 amber | WARNING |
+| 700–1000 | 🔴 red + vibration pulse | TAKE A BREAK |
+| any, while < 30 cm | 🔴 red **blinking** + vibration | TOO CLOSE! |
+
+At 30–40 cm the red LED comes on after about 3 minutes (175 ticks). A full
+recovery from 1000 takes about 5.5 minutes away from the screen. The alert mode
+(`LED + Vibrate`, `LED only` or `Vibrate only`) controls how alerts are delivered.
+The green status LED always works. The `+6` for the danger zone isn't shown in the
+GUI legend (it just says "+blink"), so that value is a reconstruction.
 
 > The rates and thresholds were picked by the team for a convincing prototype
 > under make-a-thon time pressure. They are not clinically validated.

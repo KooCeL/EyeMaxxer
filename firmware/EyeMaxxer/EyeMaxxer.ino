@@ -1,68 +1,71 @@
 // =============================================================================
-//  EyeMaxxer - Arduino firmware (Nano / Uno)
+//  EyeMaxxer - Arduino firmware (live hardware version, Nano / Uno)
 //  Imperial x Cambridge Engineering Make-a-thon on Student Wellbeing
 //
-//  A laptop-mounted HC-SR04 measures how far the user sits from the screen.
-//  The Eye Strain Risk Score (ESRS) builds up at a rate set by the distance
-//  zone, faster still in dry or noisy surroundings, and drains when the user
-//  steps away (> 100 cm). Three LEDs give the alerts:
+//  A laptop-mounted HC-SR04 measures how far you sit from the screen. Every
+//  second (one "tick") the Eye Strain Risk Score (ESRS, 0-1000) changes by an
+//  amount set by your proximity zone:
 //
-//    green  steady   ESRS == 0          fully rested
-//    amber  blinking distance < 30 cm   immediate danger zone
-//    red    blinking ESRS >= 70         accumulated strain - take a break
+//      <  30 cm   Immediate Danger   +6 / tick, red LED blinks + vibration
+//    30-40 cm     Fast Strain        +4 / tick
+//    40-60 cm     Moderate Strain    +2 / tick
+//    60-100 cm    Mild Strain        +1 / tick
+//    >= 100 cm    Recovery           -3 / tick
 //
-//  "Arduino handles all sensor logic, MATLAB visualises": telemetry is
-//  streamed over USB serial to the MATLAB GUI (matlab/EyeMaxxerDashboard.m).
-//  On a battery pack the device works fully offline.
+//  Closer than 60 cm, dry air (DHT11) and a loud room (microphone) multiply
+//  the increment by 1.3 and 1.2. The LEDs show the accumulated risk:
+//
+//    green  ESRS < 300     safe
+//    amber  300 - 699      warning
+//    red    >= 700         take a break (vibration motor pulses too)
+//
+//  "Arduino handles all sensor logic, MATLAB visualises": one status line per
+//  tick is sent over USB to the MATLAB GUI (matlab/EyeMaxxerGUI.m). On a
+//  battery pack it works fully offline.
 //
 //  Libraries: "DHT sensor library" by Adafruit (+ "Adafruit Unified Sensor")
 // =============================================================================
-#include <DHT.h>
 #include "config.h"
 #include "esrs.h"
-
+#if USE_DHT
+#include <DHT.h>
 DHT dht(PIN_DHT, DHT_TYPE);
-EsrsEngine esrs;
+#endif
 
-// --- sensor state ------------------------------------------------------------
+EsrsEngine esrs;
+TickResult state;
+
 float distBuf[US_MEDIAN_N];
 unsigned char distIdx = 0;
 float distanceCm = NO_ECHO_CM;
-float noiseLevel = 0.0f;      // normalised 0..1
-float humidityPct = -1.0f;    // -1 until the first valid DHT reading
-float temperatureC = 20.0f;   // used for speed-of-sound compensation
+int humidityPct = 0;           // 0 until the first valid DHT11 reading
+int loudestP2P = 0;            // loudest microphone window during this tick
+bool loud = false;
+unsigned char alertMode = DEFAULT_ALERT_MODE;
 
-// --- scheduler ---------------------------------------------------------------
-unsigned long lastTick = 0, lastDht = 0, lastReport = 0;
-EsrsOutputs state;
+unsigned long lastSample = 0, lastTick = 0;
 
 // -----------------------------------------------------------------------------
 //  Sensors
 // -----------------------------------------------------------------------------
-// One ultrasonic ping. Returns distance in cm, or NO_ECHO_CM if nothing echoed.
 float pingCm() {
   digitalWrite(PIN_US_TRIG, LOW);
   delayMicroseconds(2);
   digitalWrite(PIN_US_TRIG, HIGH);
   delayMicroseconds(10);
   digitalWrite(PIN_US_TRIG, LOW);
-
   unsigned long us = pulseIn(PIN_US_ECHO, HIGH, US_TIMEOUT_US);
   if (us == 0) return NO_ECHO_CM;
-
-  // Speed of sound varies ~0.6 m/s per degC; use the DHT temperature.
-  float cmPerUs = (331.3f + 0.606f * temperatureC) / 10000.0f;
-  return us * cmPerUs / 2.0f;
+  return us * 0.0343f / 2.0f;
 }
 
-// Rolling median filter - rejects the odd spurious echo from a hand or a cup.
+// Rolling median of the last US_MEDIAN_N pings - ignores one-off bad echoes.
 float medianDistance(float sample) {
   distBuf[distIdx] = sample;
   distIdx = (distIdx + 1) % US_MEDIAN_N;
-
   float s[US_MEDIAN_N];
-  for (unsigned char i = 0; i < US_MEDIAN_N; i++) s[i] = distBuf[i];
-  for (int i = 1; i < US_MEDIAN_N; i++) {  // insertion sort, N is tiny
+  for (int i = 0; i < US_MEDIAN_N; i++) s[i] = distBuf[i];
+  for (int i = 1; i < US_MEDIAN_N; i++) {
     float v = s[i];
     int j = i - 1;
     while (j >= 0 && s[j] > v) { s[j + 1] = s[j]; j--; }
@@ -71,10 +74,8 @@ float medianDistance(float sample) {
   return s[US_MEDIAN_N / 2];
 }
 
-// Microphone peak-to-peak amplitude over a short window, normalised to 0..1
-// and smoothed. Adjust MIC_FULL_SCALE (or the module's trim pot) so that a
-// noisy room reads above HIGH_NOISE_LEVEL (0.6) and a quiet one well below.
-void sampleNoise() {
+int micPeakToPeak() {
+#if USE_MIC
   int lo = 1023, hi = 0;
   unsigned long start = millis();
   while (millis() - start < MIC_WINDOW_MS) {
@@ -82,63 +83,66 @@ void sampleNoise() {
     if (v < lo) lo = v;
     if (v > hi) hi = v;
   }
-  float level = (hi - lo) / MIC_FULL_SCALE;
-  if (level > 1.0f) level = 1.0f;
-  noiseLevel += NOISE_EMA_ALPHA * (level - noiseLevel);
+  return hi - lo;
+#else
+  return 0;
+#endif
 }
 
-void sampleDht() {
+void readHumidity() {
+#if USE_DHT
   float h = dht.readHumidity();
-  float t = dht.readTemperature();
-  if (!isnan(h)) humidityPct = h;  // keep the last good value on a failed read
-  if (!isnan(t)) temperatureC = t;
+  if (!isnan(h)) humidityPct = (int)(h + 0.5f);
+#endif
 }
 
 // -----------------------------------------------------------------------------
 //  Outputs
 // -----------------------------------------------------------------------------
-void updateLeds(const EsrsOutputs& o, unsigned long now) {
-  bool blinkOn = (now / (BLINK_PERIOD_MS / 2)) % 2;
-  digitalWrite(PIN_LED_GREEN, o.greenLed);
-  digitalWrite(PIN_LED_AMBER, o.amberAlert && blinkOn);
-  digitalWrite(PIN_LED_RED,   o.redAlert && blinkOn);
+void updateOutputs(unsigned long now) {
+  bool ledsOn = alertMode != 2;
+  bool vibOn = alertMode != 1;
+  bool blinkPhase = (now / BLINK_MS) % 2;
+
+  bool g = state.level == LEVEL_SAFE;
+  bool a = ledsOn && state.level == LEVEL_WARNING;
+  bool r = ledsOn && state.level == LEVEL_DANGER;
+  if (state.blink) {                      // immediate danger overrides the level
+    g = false;
+    a = false;
+    r = ledsOn && blinkPhase;
+  }
+  digitalWrite(PIN_LED_GREEN, g);
+  digitalWrite(PIN_LED_AMBER, a);
+  digitalWrite(PIN_LED_RED, r);
+
+  // short buzz at the start of every tick while an alert is active
+  bool buzz = vibOn && state.vibrate && (now - lastTick) < VIBRATE_ON_MS;
+  digitalWrite(PIN_VIBRATION, buzz);
 }
 
-void printHeader() {
-  Serial.println(F("# EyeMaxxer"));
-  Serial.println(F("# D,t_ms,distance_cm,humidity_pct,noise,temp_c,rate_per_min,esrs,zone,green,amber,red"));
-  Serial.println(F("# zone: 0 <30cm danger | 1 30-40 fast | 2 40-60 moderate | 3 60-100 mild | 4 >100 recovery"));
-  Serial.println(F("# commands: 'r' reset ESRS, '?' print this header"));
+// One line per tick, e.g.
+// DIST:45.2,HUM:38,SOUND:0,ZONE:2,INC:2.6,ESRS:512.4,LED:1,BLINK:0,VIB:0,MODE:0
+void report() {
+  Serial.print(F("DIST:"));   Serial.print(distanceCm, 1);
+  Serial.print(F(",HUM:"));   Serial.print(humidityPct);
+  Serial.print(F(",SOUND:")); Serial.print(loud ? 1 : 0);
+  Serial.print(F(",ZONE:"));  Serial.print((int)state.zone);
+  Serial.print(F(",INC:"));   Serial.print(state.increment, 1);
+  Serial.print(F(",ESRS:"));  Serial.print(state.esrs, 1);
+  Serial.print(F(",LED:"));   Serial.print((int)state.level);
+  Serial.print(F(",BLINK:")); Serial.print(state.blink ? 1 : 0);
+  Serial.print(F(",VIB:"));   Serial.print(state.vibrate && alertMode != 1 ? 1 : 0);
+  Serial.print(F(",MODE:"));  Serial.println((int)alertMode);
 }
 
-void report(const EsrsOutputs& o, unsigned long now) {
-  Serial.print(F("D,"));
-  Serial.print(now);                 Serial.print(',');
-  Serial.print(distanceCm, 1);       Serial.print(',');
-  Serial.print(humidityPct, 1);      Serial.print(',');
-  Serial.print(noiseLevel, 2);       Serial.print(',');
-  Serial.print(temperatureC, 1);     Serial.print(',');
-  Serial.print(o.ratePerMin, 2);     Serial.print(',');
-  Serial.print(o.score, 2);          Serial.print(',');
-  Serial.print((int)o.zone);         Serial.print(',');
-  Serial.print((int)o.greenLed);     Serial.print(',');
-  Serial.print((int)o.amberAlert);   Serial.print(',');
-  Serial.println((int)o.redAlert);
-}
-
-void handleSerialCommands() {
+// 'r' resets the ESRS, 'm' cycles the alert mode, '0'/'1'/'2' set it directly.
+void handleSerial() {
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == 'r' || c == 'R') { esrs.reset(); Serial.println(F("# ESRS reset")); }
-    else if (c == '?')        { printHeader(); }
-  }
-}
-
-// Power-on self test: sweep the LEDs so a broken one is obvious.
-void ledSelfTest() {
-  const unsigned char pins[] = {PIN_LED_GREEN, PIN_LED_AMBER, PIN_LED_RED};
-  for (unsigned char i = 0; i < 3; i++) {
-    digitalWrite(pins[i], HIGH); delay(200); digitalWrite(pins[i], LOW);
+    if (c == 'r' || c == 'R') esrs.reset();
+    else if (c == 'm' || c == 'M') alertMode = (alertMode + 1) % 3;
+    else if (c >= '0' && c <= '2') alertMode = c - '0';
   }
 }
 
@@ -147,45 +151,42 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   pinMode(PIN_US_TRIG, OUTPUT);
   pinMode(PIN_US_ECHO, INPUT);
-  pinMode(PIN_LED_GREEN, OUTPUT);
-  pinMode(PIN_LED_AMBER, OUTPUT);
-  pinMode(PIN_LED_RED, OUTPUT);
+  const unsigned char outs[] = {PIN_LED_GREEN, PIN_LED_AMBER, PIN_LED_RED, PIN_VIBRATION};
+  for (unsigned char i = 0; i < 4; i++) pinMode(outs[i], OUTPUT);
 
+  // power-on self test: green, amber, red in turn
+  for (unsigned char i = 0; i < 3; i++) {
+    digitalWrite(outs[i], HIGH); delay(200); digitalWrite(outs[i], LOW);
+  }
+
+#if USE_DHT
   dht.begin();
-  for (unsigned char i = 0; i < US_MEDIAN_N; i++) distBuf[i] = NO_ECHO_CM;
-
-  ledSelfTest();
-  printHeader();
-
-  sampleDht();
-  state = esrs.update({NO_ECHO_CM, humidityPct, 0.0f}, 0.0f);
-  lastTick = lastDht = lastReport = millis();
+#endif
+  for (int i = 0; i < US_MEDIAN_N; i++) distBuf[i] = NO_ECHO_CM;
+  state = esrs.tick(NO_ECHO_CM, false, false);
+  lastSample = lastTick = millis();
 }
 
 void loop() {
   unsigned long now = millis();
-  handleSerialCommands();
+  handleSerial();
 
-  if (now - lastDht >= DHT_PERIOD_MS) {
-    lastDht = now;
-    sampleDht();
-  }
-
-  if (now - lastTick >= TICK_MS) {
-    float dt = (now - lastTick) / 1000.0f;
-    lastTick = now;
-
+  if (now - lastSample >= SAMPLE_MS) {     // 10 Hz sensing
+    lastSample = now;
     distanceCm = medianDistance(pingCm());
-    sampleNoise();
-
-    EsrsInputs in = {distanceCm, humidityPct, noiseLevel};
-    state = esrs.update(in, dt);
+    int p2p = micPeakToPeak();
+    if (p2p > loudestP2P) loudestP2P = p2p;
   }
 
-  updateLeds(state, now);
-
-  if (now - lastReport >= REPORT_PERIOD_MS) {
-    lastReport = now;
-    report(state, now);
+  if (now - lastTick >= TICK_MS) {         // 1 Hz ESRS tick
+    lastTick = now;
+    readHumidity();
+    loud = loudestP2P >= MIC_LOUD_P2P;
+    loudestP2P = 0;
+    bool dry = humidityPct > 0 && humidityPct < DRY_HUMIDITY_PCT;
+    state = esrs.tick(distanceCm, dry, loud);
+    report();
   }
+
+  updateOutputs(now);
 }
