@@ -1,0 +1,25 @@
+# MATLAB / Simulink
+*.asv
+*.autosave
+*.slxc
+*.mex*
+slprj/
+*_ert_rtw/
+*_grt_rtw/
+codegen/
+octave-workspace
+
+# Arduino / build output
+build/
+*.hex
+*.elf
+
+# Host-side test binaries
+tests/test_esrs
+tests/*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
